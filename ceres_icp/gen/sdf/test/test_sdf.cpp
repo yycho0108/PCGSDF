@@ -273,9 +273,16 @@ Eigen::MatrixXf CreateDepthImage(const Eigen::Isometry3f &camera_pose,
                                  const Eigen::Vector2i &resolution,
                                  const Eigen::Vector2f &fov,
                                  const cho::gen::SdfPtr &scene,
-                                 std::vector<Eigen::Vector3f> *const cloud) {
+                                 std::vector<Eigen::Vector3f> *const cloud,
+                                 const bool compile = false) {
   Eigen::MatrixXf out(resolution(0), resolution(1));
+
   auto sdf = cho::gen::Transformation::Create(scene, camera_pose.inverse());
+  std::vector<cho::gen::SdfData> prog;
+  if (compile) {
+    sdf->Compile(&prog);
+  }
+
   const Eigen::Vector2f step =
       fov.array() / (resolution.array() - 1).cast<float>();
 
@@ -291,8 +298,15 @@ Eigen::MatrixXf CreateDepthImage(const Eigen::Isometry3f &camera_pose,
           Eigen::AngleAxisf{ang_h, Eigen::Vector3f::UnitZ()} *
           Eigen::AngleAxisf{ang_v, Eigen::Vector3f::UnitY()} *
           Eigen::Vector3f::UnitX();
-      const float depth =
-          cho::gen::RayMarchingDepth(Eigen::Vector3f::Zero(), ray, sdf, 128);
+      float depth;
+      if (compile) {
+        depth = cho::gen::RayMarchingDepthWithProgram(Eigen::Vector3f::Zero(),
+                                                      ray, prog, 128);
+      } else {
+        depth =
+            cho::gen::RayMarchingDepth(Eigen::Vector3f::Zero(), ray, sdf, 128);
+      }
+
       out.coeffRef(i, j) = depth;
       if (cloud) {
         cloud->emplace_back(depth * ray);
@@ -307,8 +321,8 @@ Eigen::MatrixXf CreateDepthImage(const Eigen::Isometry3f &camera_pose,
 int main() {
   // Configure ...
   static constexpr const float kDegree{M_PI / 180.0F};
-  static constexpr const int kVerticalResolution{512};
-  static constexpr const int kHorizontalResolution{512};
+  static constexpr const int kVerticalResolution{256};
+  static constexpr const int kHorizontalResolution{256};
   static constexpr const float kVerticalFov{180 * kDegree};
   static constexpr const float kHorizontalFov{360 * kDegree};
   static constexpr const int kNumObjects{16};
@@ -335,8 +349,19 @@ int main() {
 
   // Raycast...
   std::vector<Eigen::Vector3f> cloud_f;
+  std::vector<Eigen::Vector3f> cloud_f_c;
+
+  auto t0 = std::chrono::high_resolution_clock::now();
   const Eigen::MatrixXf depth_image =
       CreateDepthImage(eye_pose, resolution, fov, scene_sdf, &cloud_f);
+  auto t1 = std::chrono::high_resolution_clock::now();
+  const Eigen::MatrixXf depth_image_c =
+      CreateDepthImage(eye_pose, resolution, fov, scene_sdf, &cloud_f_c, true);
+  auto t2 = std::chrono::high_resolution_clock::now();
+  fmt::print(
+      "R={} v C={}",
+      std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count(),
+      std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
 
   std::vector<Eigen::Vector3f> cloud_f_obj;
   const Eigen::MatrixXf depth_image_obj =
@@ -395,6 +420,7 @@ int main() {
     };
 
     export_data(cloud_f, depth_image, "scene");
+    export_data(cloud_f_c, depth_image_c, "scene-compiled");
     export_data(cloud_f_obj, depth_image_obj, "object");
   }
 

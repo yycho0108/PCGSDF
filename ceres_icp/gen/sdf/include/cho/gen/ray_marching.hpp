@@ -12,5 +12,12 @@ float RayMarchingDepth(
     const int max_iter,
     const float max_depth = std::numeric_limits<float>::infinity(),
     const float eps = std::numeric_limits<float>::epsilon());
-}
+
+float RayMarchingDepthWithProgram(
+    const Eigen::Vector3f& eye, const Eigen::Vector3f& ray,
+    const std::vector<SdfData>& program, const int max_iter,
+    const float max_depth = std::numeric_limits<float>::infinity(),
+    const float eps = std::numeric_limits<float>::epsilon());
+
+}  // namespace gen
 }  // namespace cho
