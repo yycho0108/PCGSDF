@@ -2,16 +2,23 @@ cmake_minimum_required(VERSION 3.16)
 project(CeresIcp)
 
 # Configure ...
-enable_language(CUDA)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
+
+# CUDA config ...
+include(CheckLanguage)
+enable_language(CUDA)
+set(CMAKE_CUDA_STANDARD 11)
+enable_language(CUDA)
+check_language(CUDA)
+
 
 include(cmake/FindEigen3.cmake)
 set(Eigen3_DIR /usr/local/share/eigen3)
 
-#find_package(Eigen 3.3 REQUIRED)
 #include_directories(${eigen3_INCLUDE_DIRS})
 
+find_package(Eigen3 3.3 REQUIRED)
 find_package(Ceres REQUIRED)
 find_package(Open3D REQUIRED)
 find_package(fmt REQUIRED)

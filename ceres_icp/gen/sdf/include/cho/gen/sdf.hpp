@@ -9,6 +9,8 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
+#include "cho/gen/sdf_types.hpp"
+
 namespace cho {
 namespace gen {
 
@@ -26,30 +28,6 @@ template <typename Value>
 inline Value Lerp(const Value& v0, const Value& v1, const float w) {
   return v0 + w * (v1 - v0);
 }
-
-enum class SdfType : std::int8_t {
-  PARAM,
-  SPHERE,
-  BOX,
-  CYLINDER,
-  PLANE,
-  ROUND,
-  NEGATION,
-  UNION,
-  INTERSECTION,
-  SUBTRACTION,
-  ONION,
-  TRANSLATION,
-  ROTATION,
-  TRANSFORMATION,
-  SCALE_BEGIN,
-  SCALE_END,
-};
-
-struct SdfData {
-  SdfType code;
-  float value;
-};
 
 /**
  * @brief Sdf Interface class.
@@ -107,114 +85,110 @@ float EvaluateSdf(const std::vector<SdfData>& program,
   Eigen::Vector3f p{point};
   for (const auto& op : program) {
     switch (op.code) {
-      case SdfType::PARAM: {
-        s.push(op.value);
-        break;
-      }
-      case SdfType::SPHERE: {
-        const float radius = Pop(s);
+      case SdfOpCode::SPHERE: {
+        const float radius = op.param[0];
         s.push(p.norm() - radius);
         break;
       }
-      case SdfType::BOX: {
-        const float rx = Pop(s);
-        const float ry = Pop(s);
-        const float rz = Pop(s);
+      case SdfOpCode::BOX: {
+        const float rx = op.param[0];
+        const float ry = op.param[1];
+        const float rz = op.param[2];
         const Eigen::Vector3f q = p.cwiseAbs() - Eigen::Vector3f{rx, ry, rz};
         s.push(q.cwiseMax(0).norm() + std::min(0.0F, q.maxCoeff()));
         break;
       }
-      case SdfType::CYLINDER: {
-        const float radius = Pop(s);
-        const float height = Pop(s);
+      case SdfOpCode::CYLINDER: {
+        const float radius = op.param[0];
+        const float height = op.param[1];
         const Eigen::Vector2f d{p.head<2>().norm() - radius,
                                 std::abs(p.z()) - height};
         s.push(std::min(d.maxCoeff(), 0.0F) + (d.cwiseMax(0.0F)).norm());
         break;
       }
-      case SdfType::PLANE: {
-        const float nx = Pop(s);
-        const float ny = Pop(s);
-        const float nz = Pop(s);
-        const float d = Pop(s);
+      case SdfOpCode::PLANE: {
+        const float nx = op.param[0];
+        const float ny = op.param[1];
+        const float nz = op.param[2];
+        const float d = op.param[3];
         s.push(Eigen::Vector3f{nx, ny, nz}.dot(p) + d);
         break;
       }
-      case SdfType::ROUND: {
+      case SdfOpCode::ROUND: {
         const float d = Pop(s);
-        const float r = Pop(s);
+        const float r = op.param[0];
         s.push(d - r);
         break;
       }
-      case SdfType::NEGATION: {
+      case SdfOpCode::NEGATION: {
         const float d = Pop(s);
         s.push(-d);
         break;
       }
-      case SdfType::UNION: {
+      case SdfOpCode::UNION: {
         const float d0 = Pop(s);
         const float d1 = Pop(s);
         s.push(std::min(d0, d1));
         break;
       }
-      case SdfType::INTERSECTION: {
+      case SdfOpCode::INTERSECTION: {
         const float d0 = Pop(s);
         const float d1 = Pop(s);
         s.push(std::max(d0, d1));
         break;
       }
-      case SdfType::SUBTRACTION: {
+      case SdfOpCode::SUBTRACTION: {
         const float d0 = Pop(s);
         const float d1 = Pop(s);
         s.push(std::max(-d0, d1));
         break;
       }
-      case SdfType::ONION: {
+      case SdfOpCode::ONION: {
         const float d0 = Pop(s);
-        const float thickness = op.value;
+        const float thickness = op.param[0];
         s.push(std::abs(d0) - thickness);
         break;
       }
-      case SdfType::TRANSLATION: {
-        const float tx = Pop(s);
-        const float ty = Pop(s);
-        const float tz = Pop(s);
+      case SdfOpCode::TRANSLATION: {
+        const float tx = op.param[0];
+        const float ty = op.param[1];
+        const float tz = op.param[2];
         const Eigen::Vector3f v{tx, ty, tz};
         p += v;
         break;
       }
-      case SdfType::ROTATION: {
-        const float qx = Pop(s);
-        const float qy = Pop(s);
-        const float qz = Pop(s);
-        const float qw = Pop(s);
+      case SdfOpCode::ROTATION: {
+        const float qx = op.param[0];
+        const float qy = op.param[1];
+        const float qz = op.param[2];
+        const float qw = op.param[3];
         const Eigen::Quaternionf q{qw, qx, qy, qz};
         p = q * p;
         break;
       }
-      case SdfType::TRANSFORMATION: {
-        const float qx = Pop(s);
-        const float qy = Pop(s);
-        const float qz = Pop(s);
-        const float qw = Pop(s);
-        const float tx = Pop(s);
-        const float ty = Pop(s);
-        const float tz = Pop(s);
+      case SdfOpCode::TRANSFORMATION: {
+        const float qx = op.param[0];
+        const float qy = op.param[1];
+        const float qz = op.param[2];
+        const float qw = op.param[3];
+        const float tx = op.param[4];
+        const float ty = op.param[5];
+        const float tz = op.param[6];
         const Eigen::Quaternionf q{qw, qx, qy, qz};
         const Eigen::Vector3f v{tx, ty, tz};
         p = (q * p + v);
         break;
       }
-      case SdfType::SCALE_BEGIN: {
+      case SdfOpCode::SCALE_BEGIN: {
         // modify `point` for the subtree.
-        p *= op.value;
+        p *= op.param[0];
         break;
       }
-      case SdfType::SCALE_END: {
+      case SdfOpCode::SCALE_END: {
         const float d = Pop(s);
-        s.push(d / op.value);
+        s.push(d / op.param[0]);
         // restore `point` for the suptree.
-        p *= op.value;
+        p *= op.param[0];
         break;
       }
     }
@@ -237,8 +211,7 @@ class Sphere : public SdfBase<Sphere> {
 
   void Compile_(std::vector<SdfData>* const program) const {
     program->emplace_back(
-        SdfData{SdfType::PARAM, radius_});               // first push param
-    program->emplace_back(SdfData{SdfType::SPHERE, 0});  // then op code
+        SdfData{SdfOpCode::SPHERE, {radius_}});  // then op code
   }
 
  private:
@@ -261,10 +234,9 @@ class Box : public SdfBase<Box> {
   }
   void Compile_(std::vector<SdfData>* const program) const {
     // Push param in reverse order
-    program->emplace_back(SdfData{SdfType::PARAM, radius_.z()});
-    program->emplace_back(SdfData{SdfType::PARAM, radius_.y()});
-    program->emplace_back(SdfData{SdfType::PARAM, radius_.x()});
-    program->emplace_back(SdfData{SdfType::BOX, 0});  // then op code
+    program->emplace_back(
+        SdfData{SdfOpCode::BOX,
+                {radius_.x(), radius_.y(), radius_.z()}});  // then op code
   }
 
  private:
@@ -288,9 +260,8 @@ class Cylinder : public SdfBase<Cylinder> {
     return std::sqrt(radius_ * radius_ + height_ * height_);
   }
   void Compile_(std::vector<SdfData>* const program) const {
-    program->emplace_back(SdfData{SdfType::PARAM, height_});
-    program->emplace_back(SdfData{SdfType::PARAM, radius_});
-    program->emplace_back(SdfData{SdfType::CYLINDER, 0});  // then op code
+    program->emplace_back(
+        SdfData{SdfOpCode::CYLINDER, {radius_, height_}});  // then op code
   }
 
   static SdfPtr CreateFromArray(const std::array<float, 2>& data) {
@@ -312,11 +283,8 @@ class Plane : public SdfBase<Plane> {
   float Radius_() const { return std::numeric_limits<float>::infinity(); }
 
   void Compile_(std::vector<SdfData>* const program) const {
-    program->emplace_back(SdfData{SdfType::PARAM, distance_});
-    program->emplace_back(SdfData{SdfType::PARAM, normal_.z()});
-    program->emplace_back(SdfData{SdfType::PARAM, normal_.y()});
-    program->emplace_back(SdfData{SdfType::PARAM, normal_.x()});
-    program->emplace_back(SdfData{SdfType::PLANE, 0});
+    program->emplace_back(SdfData{
+        SdfOpCode::PLANE, {normal_.x(), normal_.y(), normal_.z(), distance_}});
   }
 
   static SdfPtr CreateFromArray(const std::array<float, 3>& data) {
@@ -340,8 +308,7 @@ class Round : public SdfBase<Round> {
   float Radius_() const { return source_->Radius(); }
 
   void Compile_(std::vector<SdfData>* const program) const {
-    program->emplace_back(SdfData{SdfType::PARAM, radius_});
-    program->emplace_back(SdfData{SdfType::ROUND, 0});
+    program->emplace_back(SdfData{SdfOpCode::ROUND, {radius_}});
   }
 
  private:
@@ -361,7 +328,7 @@ class Negation : public SdfBase<Negation> {
 
   void Compile_(std::vector<SdfData>* const program) const {
     source_->Compile(program);
-    program->emplace_back(SdfData{SdfType::NEGATION, 0});
+    program->emplace_back(SdfData{SdfOpCode::NEGATION, {}});
   }
 
  private:
@@ -396,7 +363,7 @@ class Union : public SdfBase<Union> {
   void Compile_(std::vector<SdfData>* const program) const {
     b_->Compile(program);
     a_->Compile(program);
-    program->emplace_back(SdfData{SdfType::UNION, 0});
+    program->emplace_back(SdfData{SdfOpCode::UNION, {}});
   }
 
  private:
@@ -443,7 +410,7 @@ class Intersection : public SdfBase<Intersection> {
   void Compile_(std::vector<SdfData>* const program) const {
     b_->Compile(program);
     a_->Compile(program);
-    program->emplace_back(SdfData{SdfType::INTERSECTION, 0});
+    program->emplace_back(SdfData{SdfOpCode::INTERSECTION, {}});
   }
 
  private:
@@ -470,7 +437,7 @@ class Subtraction : public SdfBase<Subtraction> {
   void Compile_(std::vector<SdfData>* const program) const {
     b_->Compile(program);
     a_->Compile(program);
-    program->emplace_back(SdfData{SdfType::SUBTRACTION, 0});
+    program->emplace_back(SdfData{SdfOpCode::SUBTRACTION, {}});
   }
 
  private:
@@ -508,7 +475,7 @@ class SmoothUnion : public SdfBase<SmoothUnion> {
     b_->Compile(program);
     a_->Compile(program);
     // TODO(yycho0108): implement UNION_S.
-    program->emplace_back(SdfData{SdfType::UNION, 0});
+    program->emplace_back(SdfData{SdfOpCode::UNION, {}});
   }
 
  private:
@@ -535,7 +502,7 @@ class Onion : public SdfBase<Onion> {
   }
   void Compile_(std::vector<SdfData>* const program) const {
     source_->Compile(program);
-    program->emplace_back(SdfData{SdfType::ONION, thickness_});
+    program->emplace_back(SdfData{SdfOpCode::ONION, {thickness_}});
   }
 
  private:
@@ -566,26 +533,16 @@ class Transformation : public SdfBase<Transformation> {
     const Eigen::Quaternionf q{xfm_.linear()};
 
     // Apply inverse transform to point.
-    program->emplace_back(SdfData{SdfType::PARAM, ti.z()});
-    program->emplace_back(SdfData{SdfType::PARAM, ti.y()});
-    program->emplace_back(SdfData{SdfType::PARAM, ti.x()});
-    program->emplace_back(SdfData{SdfType::PARAM, qi.w()});
-    program->emplace_back(SdfData{SdfType::PARAM, qi.z()});
-    program->emplace_back(SdfData{SdfType::PARAM, qi.y()});
-    program->emplace_back(SdfData{SdfType::PARAM, qi.x()});
-    program->emplace_back(SdfData{SdfType::TRANSFORMATION, 0});
+    program->emplace_back(
+        SdfData{SdfOpCode::TRANSFORMATION,
+                {qi.x(), qi.y(), qi.z(), qi.w(), ti.x(), ti.y(), ti.z()}});
 
     source_->Compile(program);
 
     // Apply forward transform to point.
-    program->emplace_back(SdfData{SdfType::PARAM, t.z()});
-    program->emplace_back(SdfData{SdfType::PARAM, t.y()});
-    program->emplace_back(SdfData{SdfType::PARAM, t.x()});
-    program->emplace_back(SdfData{SdfType::PARAM, q.w()});
-    program->emplace_back(SdfData{SdfType::PARAM, q.z()});
-    program->emplace_back(SdfData{SdfType::PARAM, q.y()});
-    program->emplace_back(SdfData{SdfType::PARAM, q.x()});
-    program->emplace_back(SdfData{SdfType::TRANSFORMATION, 0});
+    program->emplace_back(
+        SdfData{SdfOpCode::TRANSFORMATION,
+                {q.x(), q.y(), q.z(), q.w(), t.x(), t.y(), t.z()}});
   }
 
  private:
@@ -604,9 +561,9 @@ class Scale : public SdfBase<Scale> {
   Eigen::Vector3f Center_() const { return source_->Center(); }
   float Radius_() const { return scale_ * source_->Radius(); }
   void Compile_(std::vector<SdfData>* const program) const {
-    program->emplace_back(SdfData{SdfType::SCALE_BEGIN, scale_inv_});
+    program->emplace_back(SdfData{SdfOpCode::SCALE_BEGIN, {scale_inv_}});
     source_->Compile(program);
-    program->emplace_back(SdfData{SdfType::SCALE_END, scale_});
+    program->emplace_back(SdfData{SdfOpCode::SCALE_END, {scale_}});
   }
 
  private:

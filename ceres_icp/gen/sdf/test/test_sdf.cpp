@@ -9,9 +9,12 @@
 #include <open3d/geometry/PointCloud.h>
 #include <open3d/geometry/TriangleMesh.h>
 #include <open3d/visualization/utility/DrawGeometry.h>
+#include <open3d/visualization/visualizer/Visualizer.h>
 
 #include "cho/gen/ray_marching.hpp"
 #include "cho/gen/sdf.hpp"
+
+#include "cho/gen/cuda/render.hpp"
 
 std::default_random_engine rng;
 
@@ -220,6 +223,7 @@ cho::gen::SdfPtr CreateDefaultScene(const Eigen::Vector3f &eye,
 
 #if 0
   auto room = Box::Create(Eigen::Vector3f{10, 10, 10});
+  SdfPtr vol = room;
   // room = Transformation::Create(room, Eigen::Translation3f{ 0, 0, 10 });
   room = Onion::Create(room, 0.1f);
   // room = Negation::Create(room, 0.1f);
@@ -321,16 +325,17 @@ Eigen::MatrixXf CreateDepthImage(const Eigen::Isometry3f &camera_pose,
 int main() {
   // Configure ...
   static constexpr const float kDegree{M_PI / 180.0F};
-  static constexpr const int kVerticalResolution{256};
-  static constexpr const int kHorizontalResolution{256};
-  static constexpr const float kVerticalFov{180 * kDegree};
-  static constexpr const float kHorizontalFov{360 * kDegree};
+  static constexpr const int kVerticalResolution{512};
+  static constexpr const int kHorizontalResolution{512};
+  static constexpr const float kVerticalFov{130 * kDegree};
+  static constexpr const float kHorizontalFov{240 * kDegree};
   static constexpr const int kNumObjects{16};
+  static constexpr const bool kShow{true};
 
   // Initialize RNG.
-
-  const std::int64_t seed =
-      std::chrono::high_resolution_clock::now().time_since_epoch().count();
+  // const std::int64_t seed =
+  // std::chrono::high_resolution_clock::now().time_since_epoch().count();
+  const std::int64_t seed = 0;
   fmt::print("seed={}\n", seed);
   rng.seed(seed);
 
@@ -350,25 +355,43 @@ int main() {
   // Raycast...
   std::vector<Eigen::Vector3f> cloud_f;
   std::vector<Eigen::Vector3f> cloud_f_c;
+  std::vector<Eigen::Vector3f> cloud_f_cu;
+
+  Eigen::MatrixXf depth_image, depth_image_c, depth_image_cu;
 
   auto t0 = std::chrono::high_resolution_clock::now();
-  const Eigen::MatrixXf depth_image =
-      CreateDepthImage(eye_pose, resolution, fov, scene_sdf, &cloud_f);
+  if (false) {
+    depth_image =
+        CreateDepthImage(eye_pose, resolution, fov, scene_sdf, &cloud_f);
+  }
   auto t1 = std::chrono::high_resolution_clock::now();
-  const Eigen::MatrixXf depth_image_c =
-      CreateDepthImage(eye_pose, resolution, fov, scene_sdf, &cloud_f_c, true);
+  if (false) {
+    depth_image_c = CreateDepthImage(eye_pose, resolution, fov, scene_sdf,
+                                     &cloud_f_c, true);
+  }
   auto t2 = std::chrono::high_resolution_clock::now();
+  std::vector<cho::gen::SdfData> program;
+  scene_sdf->Compile(&program);
+  CreateDepthImageCuda(eye_pose, resolution, fov, program, &depth_image_cu,
+                       &cloud_f_cu);
+  auto t3 = std::chrono::high_resolution_clock::now();
   fmt::print(
-      "R={} v C={}",
+      "R={} v C={} v CU={}",
       std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count(),
-      std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
+      std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count(),
+      std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count());
+
+  cloud_f = cloud_f_cu;
 
   std::vector<Eigen::Vector3f> cloud_f_obj;
-  const Eigen::MatrixXf depth_image_obj =
-      CreateDepthImage(eye_pose, resolution, fov, objs, &cloud_f_obj);
+  Eigen::MatrixXf depth_image_obj;
+  if (0) {
+    depth_image_obj =
+        CreateDepthImage(eye_pose, resolution, fov, objs, &cloud_f_obj);
+  }
 
   // Direct visualization ...
-  {
+  if (kShow) {
     if (true) {
       cloud_f.erase(std::remove_if(cloud_f.begin(), cloud_f.end(),
                                    [](const Eigen::Vector3f &v) -> bool {

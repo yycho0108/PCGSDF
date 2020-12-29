@@ -5,11 +5,14 @@
 namespace cho {
 namespace gen {
 
-struct SdfData;
 
 class SdfInterface;
 using SdfPtr = std::shared_ptr<SdfInterface>;
 using SdfConstPtr = std::shared_ptr<const SdfInterface>;
+
+enum class SdfOpCode : std::int8_t;
+
+struct SdfData;
 
 }  // namespace gen
 }  // namespace cho
