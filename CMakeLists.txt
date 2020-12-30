@@ -4,7 +4,7 @@ project(CeresIcp)
 # Configure ...
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
-set(CMAKE_CUDA_ARCHITECTURES 62)
+# set(CMAKE_CUDA_ARCHITECTURES 62)
 
 # CUDA config ...
 include(CheckLanguage)
@@ -14,18 +14,16 @@ enable_language(CUDA)
 check_language(CUDA)
 
 # HMM...
-add_definitions(-D_GLIBCXX_USE_CXX11_ABI=1) 
+# add_definitions(-D_GLIBCXX_USE_CXX11_ABI=0 )
 
 include(cmake/FindEigen3.cmake)
-set(Eigen3_DIR /usr/local/share/eigen3)
-
-
-set(CUDAToolkit_ROOT "/usr/local/cuda")
+# set(Eigen3_DIR /usr/local/share/eigen3)
+# set(CUDAToolkit_ROOT "/usr/local/cuda")
 find_package(Eigen3 3.3 REQUIRED)
 find_package(Ceres REQUIRED)
 find_package(Open3D REQUIRED)
 find_package(fmt REQUIRED)
-find_package(CUDAToolkit REQUIRED)
+# find_package(CUDAToolkit REQUIRED)
 
 
 function(dump_cmake_variables)

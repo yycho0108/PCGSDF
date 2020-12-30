@@ -11,5 +11,4 @@ target_include_directories(cho_gen_sdf PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include/)
 
 add_subdirectory(cuda)
-
 add_subdirectory(test)

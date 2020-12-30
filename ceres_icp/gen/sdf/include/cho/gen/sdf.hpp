@@ -11,6 +11,8 @@
 
 #include "cho/gen/sdf_types.hpp"
 
+#define USE_TEMP 1
+
 namespace cho {
 namespace gen {
 
@@ -223,10 +225,14 @@ class Sphere : public SdfBase<Sphere> {
 
   std::string Jit_(const std::string& point, const std::string& prefix,
                    int* const count, std::string* const subex) const {
+#if USE_TEMP
     const std::string ex = fmt::format("{}{}", prefix, (*count)++);
     *subex +=
         fmt::format("const float {} = length({}) - {};", ex, point, radius_);
     return ex;
+#else
+    return fmt::format("(length({}) - {})", point, radius_);
+#endif
   }
 
  private:
@@ -258,10 +264,14 @@ class Box : public SdfBase<Box> {
     const std::string q = fmt::format("{}{}", prefix, (*count)++);
     *subex += fmt::format("const float3 {} = abs({}) - make_float3({},{},{});",
                           q, point, radius_.x(), radius_.y(), radius_.z());
+#if USE_TEMP
     const std::string ex = fmt::format("{}{}", prefix, (*count)++);
     *subex += fmt::format(
         "const float {} = length(max({},0)) + min(0, max({}));", ex, q, q);
     return ex;
+#else
+    return fmt::format("(length(max({},0)) + min(0, max({})))", q, q);
+#endif
   }
 
  private:
@@ -293,10 +303,14 @@ class Cylinder : public SdfBase<Cylinder> {
         "const float2 {} = "
         "make_float2(length(make_float2({}))-{},abs({}.z)-{});",
         d, point, radius_, point, height_);
+#if USE_TEMP
     const std::string ex = fmt::format("{}{}", prefix, (*count)++);
     *subex += fmt::format(
         "const float {} = min(max({}),0.0F) + length(max({},0));", ex, d, d);
     return ex;
+#else
+    return fmt::format("(min(max({}),0.0F) + length(max({},0)))", d, d);
+#endif
   }
 
   static SdfPtr CreateFromArray(const std::array<float, 2>& data) {
@@ -324,10 +338,15 @@ class Plane : public SdfBase<Plane> {
 
   std::string Jit_(const std::string& point, const std::string& prefix,
                    int* const count, std::string* const subex) const {
+#if USE_TEMP
     const std::string ex = fmt::format("{}{}", prefix, (*count)++);
     *subex += fmt::format("const float {} = dot(make_float3({},{},{}),{})+ {};",
                           ex, normal_.x(), normal_.y(), normal_.z(), distance_);
     return ex;
+#else
+    return fmt::format("(dot(make_float3({},{},{}),{}) + {})", normal_.x(),
+                       normal_.y(), normal_.z(), distance_);
+#endif
   }
 
   static SdfPtr CreateFromArray(const std::array<float, 3>& data) {
@@ -356,10 +375,15 @@ class Round : public SdfBase<Round> {
 
   std::string Jit_(const std::string& point, const std::string& prefix,
                    int* const count, std::string* const subex) const {
+#if USE_TEMP
     const std::string ex = fmt::format("{}{}", prefix, (*count)++);
     *subex += fmt::format("const float {} = {}-{};", ex,
                           source_->Jit(point, prefix, count, subex), radius_);
     return ex;
+#else
+    return fmt::format("({}-{})", source_->Jit(point, prefix, count, subex),
+                       radius_);
+#endif
   }
 
  private:
@@ -384,10 +408,14 @@ class Negation : public SdfBase<Negation> {
 
   std::string Jit_(const std::string& point, const std::string& prefix,
                    int* const count, std::string* const subex) const {
+#if USE_TEMP
     const std::string ex = fmt::format("{}{}", prefix, (*count)++);
     *subex += fmt::format("const float {} = -{};", ex,
                           source_->Jit(point, prefix, count, subex));
     return ex;
+#else
+    return fmt::format("(-{})", source_->Jit(point, prefix, count, subex));
+#endif
   }
 
  private:
@@ -427,11 +455,16 @@ class Union : public SdfBase<Union> {
 
   std::string Jit_(const std::string& point, const std::string& prefix,
                    int* const count, std::string* const subex) const {
+#if USE_TEMP
     const std::string ex = fmt::format("{}{}", prefix, (*count)++);
     *subex += fmt::format("const float {} = min({},{});", ex,
                           a_->Jit(point, prefix, count, subex),
                           b_->Jit(point, prefix, count, subex));
     return ex;
+#else
+    return fmt::format("min({},{})", a_->Jit(point, prefix, count, subex),
+                       b_->Jit(point, prefix, count, subex));
+#endif
   }
 
  private:
@@ -482,11 +515,16 @@ class Intersection : public SdfBase<Intersection> {
   }
   std::string Jit_(const std::string& point, const std::string& prefix,
                    int* const count, std::string* const subex) const {
+#if USE_TEMP
     const std::string ex = fmt::format("{}{}", prefix, (*count)++);
     *subex += fmt::format("const float {} = max({},{});", ex,
                           a_->Jit(point, prefix, count, subex),
                           b_->Jit(point, prefix, count, subex));
     return ex;
+#else
+    return fmt::format("max({},{})", a_->Jit(point, prefix, count, subex),
+                       b_->Jit(point, prefix, count, subex));
+#endif
   }
 
  private:
@@ -517,11 +555,16 @@ class Subtraction : public SdfBase<Subtraction> {
   }
   std::string Jit_(const std::string& point, const std::string& prefix,
                    int* const count, std::string* const subex) const {
+#if USE_TEMP
     const std::string ex = fmt::format("{}{}", prefix, (*count)++);
     *subex += fmt::format("const float {} = max(-{},{});", ex,
                           a_->Jit(point, prefix, count, subex),
                           b_->Jit(point, prefix, count, subex));
     return ex;
+#else
+    return fmt::format("max(-{},{})", a_->Jit(point, prefix, count, subex),
+                       b_->Jit(point, prefix, count, subex));
+#endif
   }
 
  private:
@@ -564,11 +607,16 @@ class SmoothUnion : public SdfBase<SmoothUnion> {
   std::string Jit_(const std::string& point, const std::string& prefix,
                    int* const count, std::string* const subex) const {
     // TODO(yycho0108): implement UNION_S.
+#if USE_TEMP
     const std::string ex = fmt::format("{}{}", prefix, (*count)++);
     *subex += fmt::format("const float {} = min({},{});", ex,
                           a_->Jit(point, prefix, count, subex),
                           b_->Jit(point, prefix, count, subex));
     return ex;
+#else
+    return fmt::format("min({},{})", a_->Jit(point, prefix, count, subex),
+                       b_->Jit(point, prefix, count, subex));
+#endif
   }
 
  private:
@@ -600,11 +648,16 @@ class Onion : public SdfBase<Onion> {
 
   std::string Jit_(const std::string& point, const std::string& prefix,
                    int* const count, std::string* const subex) const {
+#if USE_TEMP
     const std::string ex = fmt::format("{}{}", prefix, (*count)++);
     *subex +=
         fmt::format("const float {} = abs({}) - {};", ex,
                     source_->Jit(point, prefix, count, subex), thickness_);
     return ex;
+#else
+    return fmt::format("(abs({}) - {})",
+                       source_->Jit(point, prefix, count, subex), thickness_);
+#endif
   }
 
  private:

@@ -15,7 +15,7 @@
 #include "cho/gen/sdf.hpp"
 
 #include "cho/gen/cuda/render.hpp"
-#include "cho/gen/cuda/render_jit.hpp"
+// #include "cho/gen/cuda/render_jit.hpp"
 
 std::default_random_engine rng;
 
@@ -389,9 +389,11 @@ int main() {
   // CUDA
   std::vector<cho::gen::SdfData> program;
   scene_sdf->Compile(&program);
-  // CreateDepthImageCuda(eye_pose, resolution, fov, program, &depth_image_cu,
-  //                     &cloud_f_cu);
+  CreateDepthImageCuda(eye_pose, resolution, fov, program, &depth_image_cu,
+                       &cloud_f_cu);
   auto t3 = std::chrono::high_resolution_clock::now();
+
+#if 0
   // CUDA+JIT
   Eigen::MatrixXf depth_image_cu_jit;
   std::vector<Eigen::Vector3f> cloud_f_cu_jit;
@@ -411,14 +413,14 @@ int main() {
                             &cloud_f_cu_jit);
   }
   auto t4 = std::chrono::high_resolution_clock::now();
+#endif
   fmt::print(
-      "R={} v C={} v CU={} v CUJ={}\n",
+      "R={} v C={} v CU={}\n",
       std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count(),
       std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count(),
-      std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count(),
-      std::chrono::duration_cast<std::chrono::milliseconds>(t4 - t3).count());
+      std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count());
 
-  cloud_f = cloud_f_cu_jit;
+  cloud_f = cloud_f_cu;
 
   std::vector<Eigen::Vector3f> cloud_f_obj;
   Eigen::MatrixXf depth_image_obj;
@@ -447,7 +449,7 @@ int main() {
     auto axes = open3d::geometry::TriangleMesh::CreateCoordinateFrame(
         0.5, eye.cast<double>());
 
-    // open3d::visualization::DrawGeometries({cloud_o3d, axes});
+    open3d::visualization::DrawGeometries({cloud_o3d, axes});
   }
 
   if (true) {
