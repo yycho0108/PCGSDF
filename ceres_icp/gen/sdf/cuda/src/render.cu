@@ -133,7 +133,6 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops,
   return s[0];
 }
 
-// device
 __global__ void RayMarchingDepthWithProgramKernel(
     const float3 eye, const float4 eye_q, const int2 res, const float2 fov,
     const SdfDataCompact* const ops, const int num_ops,
@@ -153,6 +152,7 @@ __global__ void RayMarchingDepthWithProgramKernel(
   SdfDataCompact* const ops_s = reinterpret_cast<SdfDataCompact*>(shmem);
   float* const params_s = reinterpret_cast<float*>(&ops_s[num_ops]);
   const int tid = blockDim.x * threadIdx.x + threadIdx.y;
+  // number of threads **within block**, not total.
   const int num_threads = blockDim.x * blockDim.y;
   for (int j = tid; j < num_ops; j += num_threads) {
     ops_s[j] = ops[j];
@@ -215,6 +215,134 @@ __global__ void RayMarchingDepthWithProgramKernel(
   point_cloud[index] = eye + depth * ray;
 }
 
+// Hmm ...
+struct SdfDepthImageRendererCu::Impl {
+  explicit Impl(const std::vector<cho::gen::SdfData>& scene,
+                const Eigen::Vector2i& resolution, const Eigen::Vector2f& fov);
+
+  void SetResolution(const Eigen::Vector2i& resolution);
+  void SetFov(const Eigen::Vector2f& fov);
+
+  void Render(const Eigen::Isometry3f& camera_pose,
+              Eigen::MatrixXf* const depth_image,
+              std::vector<Eigen::Vector3f>* const point_cloud);
+
+ private:
+  int2 res;
+  float2 fov;
+
+  // Scene Device buffers.
+  thrust::device_vector<float> params;
+  thrust::device_vector<SdfDataCompact> program;  // compiled sdf
+
+  // Output Device buffers.
+  // TODO(yycho0108): Does this need to be dynamic?
+  thrust::device_vector<float> depth_image_buf;
+  thrust::device_vector<float> point_cloud_buf;
+};
+
+// Forwarding calls to `impl`
+SdfDepthImageRendererCu::SdfDepthImageRendererCu(
+    const std::vector<cho::gen::SdfData>& scene,
+    const Eigen::Vector2i& resolution, const Eigen::Vector2f& fov)
+    : impl_{std::make_unique<Impl>(scene, resolution, fov)} {}
+SdfDepthImageRendererCu::~SdfDepthImageRendererCu() = default;
+void SdfDepthImageRendererCu::SetResolution(const Eigen::Vector2i& resolution) {
+  impl_->SetResolution(resolution);
+}
+void SdfDepthImageRendererCu::SetFov(const Eigen::Vector2f& fov) {
+  impl_->SetFov(fov);
+}
+
+void SdfDepthImageRendererCu::Render(
+    const Eigen::Isometry3f& camera_pose, Eigen::MatrixXf* const depth_image,
+    std::vector<Eigen::Vector3f>* const point_cloud) {
+  impl_->Render(camera_pose, depth_image, point_cloud);
+}
+
+// Actual implementation
+SdfDepthImageRendererCu::Impl::Impl(const std::vector<cho::gen::SdfData>& scene,
+                                    const Eigen::Vector2i& resolution,
+                                    const Eigen::Vector2f& fov) {
+  // Set intrinsics.
+  SetResolution(resolution);
+  SetFov(fov);
+
+  // Determine number of params.
+  int num_params{0};
+  for (const auto& op : scene) {
+    num_params += op.param.size();
+  }
+
+  // Reset device buffer for scene
+  params.resize(num_params);
+  program.resize(scene.size());
+
+  // Translate program into compact form.
+  int op_index{0};
+  int param_index{0};
+  for (const auto& op : scene) {
+    // Set program op.
+    program[op_index] = SdfDataCompact{op.code, param_index};
+    // Copy parameters.
+    thrust::copy(op.param.begin(), op.param.end(),
+                 params.begin() + param_index);
+
+    // Increment indices for populating the next op.
+    param_index += op.param.size();
+    ++op_index;
+  }
+
+  // Allocate output buffers as well.
+  depth_image_buf.resize(resolution.prod());
+  point_cloud_buf.resize(resolution.prod() * 3);
+}
+
+void SdfDepthImageRendererCu::Impl::SetResolution(
+    const Eigen::Vector2i& resolution) {
+  res = int2{resolution.x(), resolution.y()};
+}
+
+void SdfDepthImageRendererCu::Impl::SetFov(const Eigen::Vector2f& fov) {
+  this->fov = float2{fov.x(), fov.y()};
+}
+
+void SdfDepthImageRendererCu::Impl::Render(
+    const Eigen::Isometry3f& camera_pose, Eigen::MatrixXf* const depth_image,
+    std::vector<Eigen::Vector3f>* const point_cloud) {
+  // Convert pose.
+  const float3 eye{camera_pose.translation().x(), camera_pose.translation().y(),
+                   camera_pose.translation().z()};
+  const Eigen::Quaternionf q{camera_pose.linear()};
+  const float4 eye_q{q.x(), q.y(), q.z(), q.w()};
+
+  // Prep kernel dims.
+  const dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
+  const dim3 blocks((res.x + threads.x - 1) / threads.x,
+                    (res.y + threads.y - 1) / threads.y);
+  const int shmem_size =
+      sizeof(SdfDataCompact) * program.size() + sizeof(float) * params.size();
+
+  // Launch kernel.
+  RayMarchingDepthWithProgramKernel<<<blocks, threads, shmem_size>>>(
+      eye, eye_q, res, fov, thrust::raw_pointer_cast(program.data()),
+      program.size(), thrust::raw_pointer_cast(params.data()), params.size(),
+      16, 100.0, 1e-3, thrust::raw_pointer_cast(depth_image_buf.data()),
+      reinterpret_cast<float3*>(
+          thrust::raw_pointer_cast(point_cloud_buf.data())));
+
+  // Export data.
+  depth_image->resize(res.x, res.y);
+  thrust::copy(depth_image_buf.begin(), depth_image_buf.end(),
+               depth_image->data());
+
+  point_cloud->resize(res.x * res.y);
+  thrust::copy(point_cloud_buf.begin(), point_cloud_buf.end(),
+               reinterpret_cast<float*>(point_cloud->data()));
+}
+
+#if 0
+// device
 __host__ void CreateDepthImageCuda(const Eigen::Isometry3f& camera_pose,
                                    const Eigen::Vector2i& resolution,
                                    const Eigen::Vector2f& field_of_view,
@@ -309,3 +437,16 @@ __host__ void CreateDepthImageCuda(const Eigen::Isometry3f& camera_pose,
       std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count());
 #endif
 }
+#else
+__host__ void CreateDepthImageCuda(const Eigen::Isometry3f& camera_pose,
+                                   const Eigen::Vector2i& resolution,
+                                   const Eigen::Vector2f& field_of_view,
+                                   const std::vector<cho::gen::SdfData>& scene,
+                                   Eigen::MatrixXf* const depth,
+                                   std::vector<Eigen::Vector3f>* const cloud) {
+  // Instantiate renderer.
+  SdfDepthImageRendererCu{scene, resolution, field_of_view}.Render(
+      camera_pose, depth, cloud);
+}
+
+#endif

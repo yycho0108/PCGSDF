@@ -6,7 +6,7 @@ add_library(sdf_render_cu SHARED
     )
 target_compile_options(sdf_render_cu PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:
-    # --generate-line-info
+    --generate-line-info
     --use_fast_math
     # -O3
     >)

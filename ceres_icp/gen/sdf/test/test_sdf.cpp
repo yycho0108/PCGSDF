@@ -426,6 +426,8 @@ int main() {
 
 #if 1
   {
+    SdfDepthImageRendererCu depth_renderer{program, resolution, fov};
+
     open3d::visualization::Visualizer vis;
     vis.CreateVisualizerWindow();
 
@@ -485,8 +487,10 @@ int main() {
       // fov.array() = 90.0F * kDegree;
 
 #if 1
-      CreateDepthImageCuda(eye_pose_q, resolution, fov, program,
-                           &depth_image_cu, &cloud_f_cu);
+      // CreateDepthImageCuda(eye_pose_q, resolution, fov, program,
+      //                     &depth_image_cu, &cloud_f_cu);
+      depth_renderer.SetFov(fov);
+      depth_renderer.Render(eye_pose_q, &depth_image_cu, &cloud_f_cu);
 #else
       depth_image_cu =
           CreateDepthImage(eye_pose_q, resolution, fov, scene_sdf, &cloud_f_cu);
@@ -510,7 +514,9 @@ int main() {
 #endif
 
       vis.UpdateGeometry(cloud);
-      vis.PollEvents();
+      if (!vis.PollEvents()) {
+        break;
+      }
       vis.UpdateRender();
 
       auto t1 = std::chrono::high_resolution_clock::now();
