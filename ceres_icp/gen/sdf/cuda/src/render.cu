@@ -276,7 +276,7 @@ __host__ void CreateDepthImageCuda(const Eigen::Isometry3f& camera_pose,
   RayMarchingDepthWithProgramKernel<<<blocks, threads, shmem_size>>>(
       eye, eye_q, res, fov, thrust::raw_pointer_cast(program.data()),
       program.size(), thrust::raw_pointer_cast(params.data()), params.size(),
-      1024, 101.0, 1e-3, thrust::raw_pointer_cast(depth_image_buf.data()),
+      16, 100.0, 1e-3, thrust::raw_pointer_cast(depth_image_buf.data()),
       reinterpret_cast<float3*>(
           thrust::raw_pointer_cast(point_cloud_buf.data())));
 #if PROFILE_SECTIONS

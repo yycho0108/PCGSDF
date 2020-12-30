@@ -364,8 +364,8 @@ auto O3dCloudFromVecVector3f(const std::vector<Eigen::Vector3f> &cloud_in) {
 int main() {
   // Configure ...
   static constexpr const float kDegree{M_PI / 180.0F};
-  static constexpr const int kVerticalResolution{256};
-  static constexpr const int kHorizontalResolution{384};
+  static constexpr const int kVerticalResolution{128};
+  static constexpr const int kHorizontalResolution{128};
   static constexpr const float kVerticalFov{120 * kDegree};
   static constexpr const float kHorizontalFov{210 * kDegree};
   static constexpr const int kNumObjects{8};
@@ -451,9 +451,17 @@ int main() {
     vis.GetViewControl().ConvertFromPinholeCameraParameters(p);
 
     Eigen::Quaternionf q_axes = Eigen::Quaternionf::Identity();
+    float tsum = 0.0;
+    int tcount{0};
     while (true) {
-      // NOTE(yycho0108): Camera params deduced here is not perfect,
-      // but I'm sick of dealing with the stupid and inconsistent open3d API.
+      // Estimate FPS.
+      auto t0 = std::chrono::high_resolution_clock::now();
+      if (tcount > 0) {
+        const float tmean = tsum / tcount / 1e6;
+        const float fps = 1.0 / tmean;
+        fmt::print("fps = {}\n", fps);
+      }
+
       open3d::camera::PinholeCameraParameters p;
       vis.GetViewControl().ConvertToPinholeCameraParameters(p);
 
@@ -504,6 +512,12 @@ int main() {
       vis.UpdateGeometry(cloud);
       vis.PollEvents();
       vis.UpdateRender();
+
+      auto t1 = std::chrono::high_resolution_clock::now();
+
+      tsum += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0)
+                  .count();
+      ++tcount;
     }
     return 0;
   }
