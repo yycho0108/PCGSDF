@@ -1,10 +1,11 @@
+#pragma once
 
 #include <vector>
 
 #include <Eigen/Geometry>
 
-#include "cho/gen/sdf_types.hpp"
 #include "cho/gen/cuda/common.hpp"
+#include "cho/gen/sdf_types.hpp"
 
 void CreateDepthImageCuda(const Eigen::Isometry3f &camera_pose,
                           const Eigen::Vector2i &resolution,

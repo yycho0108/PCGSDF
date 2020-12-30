@@ -6,5 +6,6 @@
 
 struct SdfDataCompact {
   cho::gen::SdfOpCode code;
-  float* param;
+  int param_offset;
+  // float* param;
 };

@@ -1,3 +1,8 @@
+#ifndef STRINGIFY
+#define STRINGIFY(x) x
+#endif
+
+STRINGIFY(
 /*
  * Copyright 1993-2010 NVIDIA Corporation.  All rights reserved.
  *
@@ -815,6 +820,9 @@ inline __device__ float4 operator/(float b, float4 a) {
 // min
 ////////////////////////////////////////////////////////////////////////////////
 
+inline __device__ float min(int a, float b) {
+    return a<b? a:b;
+}
 inline __device__ float2 min(float2 a, float2 b) {
     return make_float2(min(a.x, b.x), min(a.y, b.y));
 }
@@ -1181,3 +1189,4 @@ inline __device__ float3 rotate(const float4 q, const float3 v) {
 
 
 #endif
+)

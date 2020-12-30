@@ -7,8 +7,9 @@
 #include "cho/gen/cuda/render.hpp"
 #include "cho/gen/sdf_types.hpp"
 
-#define BLOCK_SIZE 8
+#define BLOCK_SIZE 32
 #define STACK_SIZE 128
+#define USE_SHMEM 1
 
 __device__ __inline__ void Push(float* const s, int& i, const float value) {
   s[++i] = value;
@@ -16,7 +17,8 @@ __device__ __inline__ void Push(float* const s, int& i, const float value) {
 
 __device__ __inline__ float Pop(float* const s, int& i) { return s[i--]; }
 
-__device__ float EvaluateSdf(const SdfDataCompact* const ops, const int n,
+__device__ float EvaluateSdf(const SdfDataCompact* const ops,
+                             const float* const params, const int n,
                              float* const s, const float3& point) {
   // Avoid typing too much...
   using Op = cho::gen::SdfOpCode;
@@ -26,38 +28,38 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops, const int n,
   for (int i = 0; i < n; ++i) {
     // assert(index < 128);
     const SdfDataCompact& op = ops[i];
+    const float* const param = params + op.param_offset;
     switch (op.code) {
       case Op::SPHERE: {
-        const float radius = op.param[0];
+        const float radius = param[0];
         Push(s, index, sqrt(dot(p, p)) - radius);
         break;
       }
       case Op::BOX: {
-        const float rx = op.param[0];
-        const float ry = op.param[1];
-        const float rz = op.param[2];
+        const float rx = param[0];
+        const float ry = param[1];
+        const float rz = param[2];
         const float3 q = abs(p) - make_float3(rx, ry, rz);
         Push(s, index, length(max(q, 0.0F)) + min(max(q), 0.0F));
         break;
       }
       case Op::CYLINDER: {
-        const float radius = op.param[0];
-        const float height = op.param[1];
+        const float radius = param[0];
+        const float height = param[1];
         const float2 d = {sqrt(p.x * p.x + p.y * p.y) - radius,
                           std::abs(p.z) - height};
         Push(s, index, min(max(d), 0.0F) + length(max(d, 0.0F)));
         break;
       }
       case Op::PLANE: {
-        const float3 normal =
-            make_float3(op.param[0], op.param[1], op.param[2]);
-        const float d = op.param[3];
+        const float3 normal = make_float3(param[0], param[1], param[2]);
+        const float d = param[3];
         Push(s, index, dot(normal, p) + d);
         break;
       }
       case Op::ROUND: {
         const float d = Pop(s, index);
-        const float r = op.param[0];
+        const float r = param[0];
         Push(s, index, d - r);
         break;
       }
@@ -86,40 +88,38 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops, const int n,
       }
       case Op::ONION: {
         const float d0 = Pop(s, index);
-        const float thickness = op.param[0];
+        const float thickness = param[0];
         Push(s, index, std::abs(d0) - thickness);
         break;
       }
       case Op::TRANSLATION: {
-        const float tx = op.param[0];
-        const float ty = op.param[1];
-        const float tz = op.param[2];
+        const float tx = param[0];
+        const float ty = param[1];
+        const float tz = param[2];
         p += make_float3(tx, ty, tz);
         break;
       }
       case Op::ROTATION: {
-        const float4 q =
-            make_float4(op.param[0], op.param[1], op.param[2], op.param[3]);
+        const float4 q = make_float4(param[0], param[1], param[2], param[3]);
         p = rotate(q, p);
         break;
       }
       case Op::TRANSFORMATION: {
-        const float4 q =
-            make_float4(op.param[0], op.param[1], op.param[2], op.param[3]);
-        const float3 v = make_float3(op.param[4], op.param[5], op.param[6]);
+        const float4 q = make_float4(param[0], param[1], param[2], param[3]);
+        const float3 v = make_float3(param[4], param[5], param[6]);
         p = rotate(q, p) + v;
         break;
       }
       case Op::SCALE_BEGIN: {
         // modify `point` for the subtree.
-        p *= op.param[0];
+        p *= param[0];
         break;
       }
       case Op::SCALE_END: {
         const float d = Pop(s, index);
-        Push(s, index, d / op.param[0]);
+        Push(s, index, d / param[0]);
         // restore `point` for the suptree.
-        p *= op.param[0];
+        p *= param[0];
         break;
       }
     }
@@ -132,7 +132,8 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops, const int n,
 // device
 __global__ void RayMarchingDepthWithProgramKernel(
     const float3 eye, const float4 eye_q, const int2 res, const float2 fov,
-    const SdfDataCompact* const ops, const int num_ops, const int max_iter,
+    const SdfDataCompact* const ops, const int num_ops,
+    const float* const params, const int num_params, const int max_iter,
     const float max_depth, const float eps, float* const depth_image,
     float3* const point_cloud) {
   // Determine self index and return if OOB.
@@ -143,31 +144,41 @@ __global__ void RayMarchingDepthWithProgramKernel(
   }
   const int index = x * res.y + y;
 
-  // Populate shared memory ops.
-  // const int num_threads = gridDim.x * gridDim.y * blockDim.x * blockDim.y;
-  // extern __shared__ SdfDataCompact ops_s[];
-  // for (int j = index; j < num_ops; j += num_threads) {
-  //  ops_s[j] = ops[j];
-  //}
-  //__syncthreads();
-  // printf("%d(+N%d)/%d\n", index, num_threads, num_ops);
+#if USE_SHMEM
+  extern __shared__ std::uint8_t shmem[];
+  SdfDataCompact* const ops_s = reinterpret_cast<SdfDataCompact*>(shmem);
+  float* const params_s = reinterpret_cast<float*>(&ops_s[num_ops]);
+  const int tid = blockDim.x * threadIdx.x + threadIdx.y;
+  const int num_threads = blockDim.x * blockDim.y;
+  for (int j = tid; j < num_ops; j += num_threads) {
+    ops_s[j] = ops[j];
+  }
+  for (int j = tid; j < num_params; j += num_threads) {
+    params_s[j] = params[j];
+  }
+  __syncthreads();
+#endif
 
   // Each thread will have its own `stack`.
   // Hopefully it would not overflow...
   float stack[STACK_SIZE];
 
-  // Compute ray based on x,y, fov and resolution ...
+  // Compute ray based on x,y, fov and resolution.
   const float2 fov_step = fov / make_float2(res);
   const float2 angles = fov / -2.0F + make_float2(x, y) * fov_step;
   const float c = cos(angles.x);
-  float3 ray{c * cos(angles.y), c * sin(angles.y), sin(angles.x)};
-  ray = rotate(eye_q, ray);
+  const float3 ray_local{c * cos(angles.y), c * sin(angles.y), sin(angles.x)};
+  const float3 ray = rotate(eye_q, ray_local);
 
   // Perform RayMarching.
   float depth = 0.0F;
   for (int i = 0; i < max_iter; ++i) {
     const float3 point = eye + depth * ray;
-    const float offset = EvaluateSdf(ops, num_ops, stack, point);
+#if USE_SHMEM
+    const float offset = EvaluateSdf(ops_s, params_s, num_ops, stack, point);
+#else
+    const float offset = EvaluateSdf(ops, params, num_ops, stack, point);
+#endif
     if (offset < eps) {
       break;
     }
@@ -178,7 +189,7 @@ __global__ void RayMarchingDepthWithProgramKernel(
     }
   }
 
-  // Output.!
+  // Output!
   depth_image[index] = depth;
   point_cloud[index] = depth * ray;
 }
@@ -201,9 +212,9 @@ __host__ void CreateDepthImageCuda(const Eigen::Isometry3f& camera_pose,
   thrust::device_vector<SdfDataCompact> program(scene.size());
   int op_index{0};
   int param_index{0};
-  float* const ptr = thrust::raw_pointer_cast(params.data());
+  // float* const ptr = thrust::raw_pointer_cast(params.data());
   for (const auto& op : scene) {
-    program[op_index] = SdfDataCompact{op.code, ptr + param_index};
+    program[op_index] = SdfDataCompact{op.code, param_index};
     thrust::copy(op.param.begin(), op.param.end(),
                  params.begin() + param_index);
 
@@ -229,18 +240,20 @@ __host__ void CreateDepthImageCuda(const Eigen::Isometry3f& camera_pose,
   const dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
   const dim3 blocks((resolution.x() + threads.x - 1) / threads.x,
                     (resolution.y() + threads.y - 1) / threads.y);
-  auto t1 = std::chrono::high_resolution_clock::now();
-
+  // cudaDeviceSynchronize();
+  // auto t1 = std::chrono::high_resolution_clock::now();
   // TODO(yycho0108): Remove hardcoded params `max_iter`, `max_depth`, `eps`.
-  RayMarchingDepthWithProgramKernel<<<blocks, threads>>>(
+  const int shmem_size =
+      sizeof(SdfDataCompact) * program.size() + sizeof(float) * params.size();
+  RayMarchingDepthWithProgramKernel<<<blocks, threads, shmem_size>>>(
       eye, eye_q, res, fov, thrust::raw_pointer_cast(program.data()),
-      program.size(), 128, 100, 1e-3,
-      thrust::raw_pointer_cast(depth_image_buf.data()),
+      program.size(), thrust::raw_pointer_cast(params.data()), params.size(),
+      128, 100, 1e-3, thrust::raw_pointer_cast(depth_image_buf.data()),
       reinterpret_cast<float3*>(
           thrust::raw_pointer_cast(point_cloud_buf.data())));
   // FIXME(yycho0108): Is this required?
-  cudaDeviceSynchronize();
-  auto t2 = std::chrono::high_resolution_clock::now();
+  // cudaDeviceSynchronize();
+  // auto t2 = std::chrono::high_resolution_clock::now();
 
   // export data.
   depth->resize(resolution.x(), resolution.y());
@@ -249,15 +262,15 @@ __host__ void CreateDepthImageCuda(const Eigen::Isometry3f& camera_pose,
   cloud->resize(resolution.prod());
   thrust::copy(point_cloud_buf.begin(), point_cloud_buf.end(),
                reinterpret_cast<float*>(cloud->data()));
-  auto t3 = std::chrono::high_resolution_clock::now();
+  // auto t3 = std::chrono::high_resolution_clock::now();
 
-  printf(
-      "PREP %d\n",
-      std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
-  printf(
-      "KERNEL %d\n",
-      std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
-  printf(
-      "EXPORT %d\n",
-      std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count());
+  // printf(
+  //    "PREP %d\n",
+  //    std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+  // printf(
+  //    "KERNEL %d\n",
+  //    std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
+  // printf(
+  //    "EXPORT %d\n",
+  //    std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count());
 }

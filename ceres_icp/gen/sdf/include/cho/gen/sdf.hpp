@@ -47,6 +47,8 @@ class SdfInterface {
   virtual Eigen::Vector3f Center() const = 0;
   virtual float Radius() const = 0;
   virtual void Compile(std::vector<SdfData>* const program) const = 0;
+  virtual std::string Jit(const std::string& point, const std::string& prefix,
+                          int* const count, std::string* const subex) const = 0;
 };
 
 template <typename Derived>
@@ -64,6 +66,11 @@ class SdfBase : public SdfInterface {
   virtual inline void Compile(
       std::vector<SdfData>* const program) const override {
     return static_cast<const Derived*>(this)->Compile_(program);
+  }
+  virtual inline std::string Jit(const std::string& point,
+                                 const std::string& prefix, int* const count,
+                                 std::string* const subex) const override {
+    return static_cast<const Derived*>(this)->Jit_(point, prefix, count, subex);
   }
 
   template <typename... Args>
@@ -214,6 +221,14 @@ class Sphere : public SdfBase<Sphere> {
         SdfData{SdfOpCode::SPHERE, {radius_}});  // then op code
   }
 
+  std::string Jit_(const std::string& point, const std::string& prefix,
+                   int* const count, std::string* const subex) const {
+    const std::string ex = fmt::format("{}{}", prefix, (*count)++);
+    *subex +=
+        fmt::format("const float {} = length({}) - {};", ex, point, radius_);
+    return ex;
+  }
+
  private:
   float radius_;
 };
@@ -238,6 +253,16 @@ class Box : public SdfBase<Box> {
         SdfData{SdfOpCode::BOX,
                 {radius_.x(), radius_.y(), radius_.z()}});  // then op code
   }
+  std::string Jit_(const std::string& point, const std::string& prefix,
+                   int* const count, std::string* const subex) const {
+    const std::string q = fmt::format("{}{}", prefix, (*count)++);
+    *subex += fmt::format("const float3 {} = abs({}) - make_float3({},{},{});",
+                          q, point, radius_.x(), radius_.y(), radius_.z());
+    const std::string ex = fmt::format("{}{}", prefix, (*count)++);
+    *subex += fmt::format(
+        "const float {} = length(max({},0)) + min(0, max({}));", ex, q, q);
+    return ex;
+  }
 
  private:
   Eigen::Vector3f radius_;
@@ -248,11 +273,8 @@ class Cylinder : public SdfBase<Cylinder> {
   explicit Cylinder(const float height, const float radius)
       : height_{height}, radius_{radius} {}
   float Distance_(const Eigen::Vector3f& point) const {
-    // const Eigen::Vector2f d{ point.head<2>().norm() - radius_,
-    // std::abs(point.z()) - height_ };
-    const Eigen::Vector2f d =
-        Eigen::Vector2f(point.head<2>().norm(), point.z()).cwiseAbs() -
-        Eigen::Vector2f{radius_, height_};
+    const Eigen::Vector2f d{point.head<2>().norm() - radius_,
+                            std::abs(point.z()) - height_};
     return std::min(d.maxCoeff(), 0.0F) + (d.cwiseMax(0.0F)).norm();
   }
   Eigen::Vector3f Center_() const { return Eigen::Vector3f::Zero(); }
@@ -262,6 +284,19 @@ class Cylinder : public SdfBase<Cylinder> {
   void Compile_(std::vector<SdfData>* const program) const {
     program->emplace_back(
         SdfData{SdfOpCode::CYLINDER, {radius_, height_}});  // then op code
+  }
+
+  std::string Jit_(const std::string& point, const std::string& prefix,
+                   int* const count, std::string* const subex) const {
+    const std::string d = fmt::format("{}{}", prefix, (*count)++);
+    *subex += fmt::format(
+        "const float2 {} = "
+        "make_float2(length(make_float2({}))-{},abs({}.z)-{});",
+        d, point, radius_, point, height_);
+    const std::string ex = fmt::format("{}{}", prefix, (*count)++);
+    *subex += fmt::format(
+        "const float {} = min(max({}),0.0F) + length(max({},0));", ex, d, d);
+    return ex;
   }
 
   static SdfPtr CreateFromArray(const std::array<float, 2>& data) {
@@ -285,6 +320,14 @@ class Plane : public SdfBase<Plane> {
   void Compile_(std::vector<SdfData>* const program) const {
     program->emplace_back(SdfData{
         SdfOpCode::PLANE, {normal_.x(), normal_.y(), normal_.z(), distance_}});
+  }
+
+  std::string Jit_(const std::string& point, const std::string& prefix,
+                   int* const count, std::string* const subex) const {
+    const std::string ex = fmt::format("{}{}", prefix, (*count)++);
+    *subex += fmt::format("const float {} = dot(make_float3({},{},{}),{})+ {};",
+                          ex, normal_.x(), normal_.y(), normal_.z(), distance_);
+    return ex;
   }
 
   static SdfPtr CreateFromArray(const std::array<float, 3>& data) {
@@ -311,6 +354,14 @@ class Round : public SdfBase<Round> {
     program->emplace_back(SdfData{SdfOpCode::ROUND, {radius_}});
   }
 
+  std::string Jit_(const std::string& point, const std::string& prefix,
+                   int* const count, std::string* const subex) const {
+    const std::string ex = fmt::format("{}{}", prefix, (*count)++);
+    *subex += fmt::format("const float {} = {}-{};", ex,
+                          source_->Jit(point, prefix, count, subex), radius_);
+    return ex;
+  }
+
  private:
   SdfPtr source_;
   float radius_;
@@ -329,6 +380,14 @@ class Negation : public SdfBase<Negation> {
   void Compile_(std::vector<SdfData>* const program) const {
     source_->Compile(program);
     program->emplace_back(SdfData{SdfOpCode::NEGATION, {}});
+  }
+
+  std::string Jit_(const std::string& point, const std::string& prefix,
+                   int* const count, std::string* const subex) const {
+    const std::string ex = fmt::format("{}{}", prefix, (*count)++);
+    *subex += fmt::format("const float {} = -{};", ex,
+                          source_->Jit(point, prefix, count, subex));
+    return ex;
   }
 
  private:
@@ -364,6 +423,15 @@ class Union : public SdfBase<Union> {
     b_->Compile(program);
     a_->Compile(program);
     program->emplace_back(SdfData{SdfOpCode::UNION, {}});
+  }
+
+  std::string Jit_(const std::string& point, const std::string& prefix,
+                   int* const count, std::string* const subex) const {
+    const std::string ex = fmt::format("{}{}", prefix, (*count)++);
+    *subex += fmt::format("const float {} = min({},{});", ex,
+                          a_->Jit(point, prefix, count, subex),
+                          b_->Jit(point, prefix, count, subex));
+    return ex;
   }
 
  private:
@@ -412,6 +480,14 @@ class Intersection : public SdfBase<Intersection> {
     a_->Compile(program);
     program->emplace_back(SdfData{SdfOpCode::INTERSECTION, {}});
   }
+  std::string Jit_(const std::string& point, const std::string& prefix,
+                   int* const count, std::string* const subex) const {
+    const std::string ex = fmt::format("{}{}", prefix, (*count)++);
+    *subex += fmt::format("const float {} = max({},{});", ex,
+                          a_->Jit(point, prefix, count, subex),
+                          b_->Jit(point, prefix, count, subex));
+    return ex;
+  }
 
  private:
   SdfPtr a_;
@@ -438,6 +514,14 @@ class Subtraction : public SdfBase<Subtraction> {
     b_->Compile(program);
     a_->Compile(program);
     program->emplace_back(SdfData{SdfOpCode::SUBTRACTION, {}});
+  }
+  std::string Jit_(const std::string& point, const std::string& prefix,
+                   int* const count, std::string* const subex) const {
+    const std::string ex = fmt::format("{}{}", prefix, (*count)++);
+    *subex += fmt::format("const float {} = max(-{},{});", ex,
+                          a_->Jit(point, prefix, count, subex),
+                          b_->Jit(point, prefix, count, subex));
+    return ex;
   }
 
  private:
@@ -477,6 +561,15 @@ class SmoothUnion : public SdfBase<SmoothUnion> {
     // TODO(yycho0108): implement UNION_S.
     program->emplace_back(SdfData{SdfOpCode::UNION, {}});
   }
+  std::string Jit_(const std::string& point, const std::string& prefix,
+                   int* const count, std::string* const subex) const {
+    // TODO(yycho0108): implement UNION_S.
+    const std::string ex = fmt::format("{}{}", prefix, (*count)++);
+    *subex += fmt::format("const float {} = min({},{});", ex,
+                          a_->Jit(point, prefix, count, subex),
+                          b_->Jit(point, prefix, count, subex));
+    return ex;
+  }
 
  private:
   SdfPtr a_;
@@ -503,6 +596,15 @@ class Onion : public SdfBase<Onion> {
   void Compile_(std::vector<SdfData>* const program) const {
     source_->Compile(program);
     program->emplace_back(SdfData{SdfOpCode::ONION, {thickness_}});
+  }
+
+  std::string Jit_(const std::string& point, const std::string& prefix,
+                   int* const count, std::string* const subex) const {
+    const std::string ex = fmt::format("{}{}", prefix, (*count)++);
+    *subex +=
+        fmt::format("const float {} = abs({}) - {};", ex,
+                    source_->Jit(point, prefix, count, subex), thickness_);
+    return ex;
   }
 
  private:
@@ -545,6 +647,28 @@ class Transformation : public SdfBase<Transformation> {
                 {q.x(), q.y(), q.z(), q.w(), t.x(), t.y(), t.z()}});
   }
 
+  std::string Jit_(const std::string& point, const std::string& prefix,
+                   int* const count, std::string* const subex) const {
+    const std::string tpoint = fmt::format("{}{}", prefix, (*count)++);
+
+    const auto& ti = xfm_inv_.translation();
+    const Eigen::Quaternionf qi{xfm_inv_.linear()};
+
+    *subex += fmt::format(
+        "const float3 {} = rotate(make_float4({},{},{},{}), {}) + "
+        "make_float3({},{},{});",
+        tpoint, qi.x(), qi.y(), qi.z(), qi.w(), point, ti.x(), ti.y(), ti.z());
+
+#if 0
+    const std::string ex = fmt::format("{}{}", prefix, (*count)++);
+    *subex += fmt::format("const float {} = {};", ex,
+                          source_->Jit(tpoint, prefix, count, subex));
+    return ex;
+#else
+    return source_->Jit(tpoint, prefix, count, subex);
+#endif
+  }
+
  private:
   SdfPtr source_;
   Eigen::Isometry3f xfm_;
@@ -564,6 +688,18 @@ class Scale : public SdfBase<Scale> {
     program->emplace_back(SdfData{SdfOpCode::SCALE_BEGIN, {scale_inv_}});
     source_->Compile(program);
     program->emplace_back(SdfData{SdfOpCode::SCALE_END, {scale_}});
+  }
+
+  std::string Jit_(const std::string& point, const std::string& prefix,
+                   int* const count, std::string* const subex) const {
+    const std::string spoint = fmt::format("{}{}", prefix, (*count)++);
+    *subex +=
+        fmt::format("const float3 {} = {} * {};", spoint, scale_inv_, point);
+
+    const std::string ex = fmt::format("{}{}", prefix, (*count)++);
+    *subex += fmt::format("const float {} = {} * {};", ex, scale_,
+                          source_->Jit(spoint, prefix, count, subex));
+    return ex;
   }
 
  private:

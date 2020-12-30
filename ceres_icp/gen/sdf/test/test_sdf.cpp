@@ -15,6 +15,7 @@
 #include "cho/gen/sdf.hpp"
 
 #include "cho/gen/cuda/render.hpp"
+#include "cho/gen/cuda/render_jit.hpp"
 
 std::default_random_engine rng;
 
@@ -44,15 +45,26 @@ cho::gen::SdfPtr MakeTangentApprox(const cho::gen::SdfPtr &source,
   return source;
 }
 
+template <typename Iterator>
+cho::gen::SdfPtr UnionTree(Iterator i0, Iterator i1) {
+  const int d = std::distance(i0, i1);
+  if (d <= 1) {
+    return *i0;
+  }
+  auto im = std::next(i0, d / 2);
+  return cho::gen::Union::Create(UnionTree(i0, im), UnionTree(im, i1));
+}
+
 cho::gen::SdfPtr GenerateSpace(const int num_boxes, const Eigen::Vector3f &eye,
                                cho::gen::SdfPtr *const vol) {
   using namespace cho::gen;
   std::uniform_real_distribution<float> sdist{5.0, 15.0};
   std::uniform_real_distribution<float> udist{-10.0, 10.0};
 
-  SdfPtr out{nullptr};
-  int count{0};
-  while (count < num_boxes) {
+  std::vector<SdfPtr> rooms;
+  rooms.reserve(num_boxes);
+  SdfPtr out;
+  while (rooms.size() < num_boxes) {
     std::array<float, traits<Box>::DoF> a;
     std::generate(a.begin(), a.end(), [&udist]() { return udist(rng); });
     auto room = Box::CreateFromArray(a);
@@ -66,19 +78,22 @@ cho::gen::SdfPtr GenerateSpace(const int num_boxes, const Eigen::Vector3f &eye,
     const Eigen::Vector3f pos{udist(rng), udist(rng), udist(rng)};
     room = Transformation::Create(room, Eigen::Translation3f{pos});
 
-    if (out) {
-      room = MakeTangentApprox(room, out, false);
-      out = Union::Create(out, room);
-      ++count;
-    } else {
+    if (rooms.empty()) {
       // Initial room must contain camera.
       if (room->Distance(eye) > 0) {
         continue;
       }
       out = room;
-      ++count;
+      rooms.emplace_back(room);
+    } else {
+      room = MakeTangentApprox(room, out, false);
+      out = Union::Create(out, room);
+      rooms.emplace_back(room);
     }
   }
+
+  // Rebuild out from balanced tree of unions.
+  out = UnionTree(rooms.begin(), rooms.end());
 
   // vol == occupied internal volume
   if (vol) {
@@ -98,7 +113,6 @@ cho::gen::SdfPtr GenerateObject(const int num_primitives,
                                 const Eigen::Vector3f &eye) {
   using namespace cho::gen;
 
-  SdfPtr dbg{nullptr};
   SdfPtr out{nullptr};
 
   const float sr = scene->Radius();
@@ -111,8 +125,9 @@ cho::gen::SdfPtr GenerateObject(const int num_primitives,
   // std::uniform_real_distribution<float> udist{-0.1F * sr, 0.1F * sr};
   std::uniform_real_distribution<float> udist{-2, 2};
   std::uniform_int_distribution<int> sdf_type{0, 2};
-  int count{0};
-  while (count < num_primitives) {
+
+  std::vector<SdfPtr> parts;
+  while (parts.size() < num_primitives) {
     // Generate primitive.
     // TODO(yycho0108): Decay primitive size as a function of hierarchy?
     auto t = sdf_type(rng);
@@ -163,7 +178,7 @@ cho::gen::SdfPtr GenerateObject(const int num_primitives,
         continue;
       }
       out = sdf;
-      ++count;
+      parts.emplace_back(sdf);
       continue;
     }
 
@@ -185,34 +200,36 @@ cho::gen::SdfPtr GenerateObject(const int num_primitives,
     }
 
     // debug-only construct .
-    if (!dbg) {
-      auto d = out->Center() - sdf->Center();
-      auto cyl = Cylinder::Create(0.5 * d.norm(), 0.1f);
-      cyl = Transformation::Create(
-          cyl, Eigen::Translation3f{0.5 * (out->Center() + sdf->Center())} *
-                   Eigen::Quaternionf::FromTwoVectors(Eigen::Vector3f::UnitZ(),
-                                                      d.normalized()));
-      dbg = cyl;
-    } else {
-      auto d = out->Center() - sdf->Center();
-      auto cyl = Cylinder::Create(0.5 * d.norm(), 0.1f);
-      cyl = Transformation::Create(
-          cyl, Eigen::Translation3f{0.5 * (out->Center() + sdf->Center())} *
-                   Eigen::Quaternionf::FromTwoVectors(Eigen::Vector3f::UnitZ(),
-                                                      d.normalized()));
-      dbg = Union::Create(dbg, cyl);
-    }
+    // if (!dbg) {
+    //  auto d = out->Center() - sdf->Center();
+    //  auto cyl = Cylinder::Create(0.5 * d.norm(), 0.1f);
+    //  cyl = Transformation::Create(
+    //      cyl, Eigen::Translation3f{0.5 * (out->Center() + sdf->Center())} *
+    //               Eigen::Quaternionf::FromTwoVectors(Eigen::Vector3f::UnitZ(),
+    //                                                  d.normalized()));
+    //  dbg = cyl;
+    //} else {
+    //  auto d = out->Center() - sdf->Center();
+    //  auto cyl = Cylinder::Create(0.5 * d.norm(), 0.1f);
+    //  cyl = Transformation::Create(
+    //      cyl, Eigen::Translation3f{0.5 * (out->Center() + sdf->Center())} *
+    //               Eigen::Quaternionf::FromTwoVectors(Eigen::Vector3f::UnitZ(),
+    //                                                  d.normalized()));
+    //  dbg = Union::Create(dbg, cyl);
+    //}
 
     // Merge.
     sdf = MakeTangentApprox(sdf, out);
     out = Union::Create(out, sdf);
+    parts.emplace_back(sdf);
     // out = SmoothUnion::Create(out, sdf, 0.25f);
-    ++count;
   }
 
-  if (dbg) {
-    out = Union::Create(out, dbg);
-  }
+  out = UnionTree(parts.begin(), parts.end());
+
+  // if (dbg) {
+  //  out = Union::Create(out, dbg);
+  //}
   return out;
 }
 
@@ -253,17 +270,15 @@ cho::gen::SdfPtr CreateDefaultScene(const Eigen::Vector3f &eye,
   // scene = Union::Create(scene, pillar0);
   // return scene;
 
+  // Generate Objects.
   std::uniform_int_distribution ndist{1, 8};
-  SdfPtr objs{nullptr};
+  std::vector<SdfPtr> objects;
+  SdfPtr objs;
   for (int i = 0; i < num_objects; ++i) {
     auto obj = GenerateObject(ndist(rng), scene, vol, eye);
-    if (!objs) {
-      fmt::print("Reset `objs`\n");
-      objs = obj;
-      continue;
-    }
-    objs = Union::Create(objs, obj);
+    objects.emplace_back(obj);
   }
+  objs = UnionTree(objects.begin(), objects.end());
   // [Optional] output objects only
   if (objs_out) {
     *objs_out = objs;
@@ -327,15 +342,16 @@ int main() {
   static constexpr const float kDegree{M_PI / 180.0F};
   static constexpr const int kVerticalResolution{512};
   static constexpr const int kHorizontalResolution{512};
-  static constexpr const float kVerticalFov{130 * kDegree};
-  static constexpr const float kHorizontalFov{240 * kDegree};
+  static constexpr const float kVerticalFov{180 * kDegree};
+  static constexpr const float kHorizontalFov{360 * kDegree};
   static constexpr const int kNumObjects{16};
   static constexpr const bool kShow{true};
 
   // Initialize RNG.
   // const std::int64_t seed =
-  // std::chrono::high_resolution_clock::now().time_since_epoch().count();
-  const std::int64_t seed = 0;
+  //    std::chrono::high_resolution_clock::now().time_since_epoch().count();
+  // const std::int64_t seed = 0;
+  const std::int64_t seed = 1609268978845759618;
   fmt::print("seed={}\n", seed);
   rng.seed(seed);
 
@@ -370,18 +386,39 @@ int main() {
                                      &cloud_f_c, true);
   }
   auto t2 = std::chrono::high_resolution_clock::now();
+  // CUDA
   std::vector<cho::gen::SdfData> program;
   scene_sdf->Compile(&program);
-  CreateDepthImageCuda(eye_pose, resolution, fov, program, &depth_image_cu,
-                       &cloud_f_cu);
+  // CreateDepthImageCuda(eye_pose, resolution, fov, program, &depth_image_cu,
+  //                     &cloud_f_cu);
   auto t3 = std::chrono::high_resolution_clock::now();
+  // CUDA+JIT
+  Eigen::MatrixXf depth_image_cu_jit;
+  std::vector<Eigen::Vector3f> cloud_f_cu_jit;
+  const std::string point_arg{"point"};
+  std::string prefix{"jit_tmp"};
+  std::string subex{""};
+  int count{0};
+  const std::string program_source =
+      scene_sdf->Jit(point_arg, prefix, &count, &subex);
+  fmt::print("{}\n const float distance = {};\n", subex, program_source);
+
+  Eigen::AngleAxisf q{0.1, Eigen::Vector3f::UnitZ()};
+  for (int k = 0; k < 128; ++k) {
+    const Eigen::Isometry3f eye_pose_q = eye_pose * q;
+    CreateDepthImageCudaJit(eye_pose_q, resolution, fov, point_arg, subex,
+                            program_source, &depth_image_cu_jit,
+                            &cloud_f_cu_jit);
+  }
+  auto t4 = std::chrono::high_resolution_clock::now();
   fmt::print(
-      "R={} v C={} v CU={}",
+      "R={} v C={} v CU={} v CUJ={}\n",
       std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count(),
       std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count(),
-      std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count());
+      std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count(),
+      std::chrono::duration_cast<std::chrono::milliseconds>(t4 - t3).count());
 
-  cloud_f = cloud_f_cu;
+  cloud_f = cloud_f_cu_jit;
 
   std::vector<Eigen::Vector3f> cloud_f_obj;
   Eigen::MatrixXf depth_image_obj;
@@ -410,7 +447,7 @@ int main() {
     auto axes = open3d::geometry::TriangleMesh::CreateCoordinateFrame(
         0.5, eye.cast<double>());
 
-    open3d::visualization::DrawGeometries({cloud_o3d, axes});
+    // open3d::visualization::DrawGeometries({cloud_o3d, axes});
   }
 
   if (true) {
