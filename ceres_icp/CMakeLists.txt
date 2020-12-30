@@ -11,4 +11,5 @@ find_package(Eigen3 REQUIRED)
 #    ${eigen3_INCLUDE_DIRS} ${Open3D_INCLUDE_DIRS} )
 
 add_subdirectory(gen)
+add_subdirectory(vis)
 # dump_cmake_variables()

@@ -19,7 +19,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
 # CUDA config ...
 include(CheckLanguage)
 enable_language(CUDA)
-set(CMAKE_CUDA_STANDARD 11)
+set(CMAKE_CUDA_STANDARD 17)
 enable_language(CUDA)
 check_language(CUDA)
 

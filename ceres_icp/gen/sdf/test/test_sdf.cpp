@@ -95,6 +95,10 @@ cho::gen::SdfPtr GenerateSpace(const int num_boxes, const Eigen::Vector3f &eye,
   // Rebuild out from balanced tree of unions.
   out = UnionTree(rooms.begin(), rooms.end());
 
+  // out = Sphere::Create(30.0F);
+  // out = Plane::Create(Eigen::Vector3f::UnitZ(), 1.0F);
+  // out = Box::Create(Eigen::Vector3f{5.0, 5.0, 5.0});
+
   // vol == occupied internal volume
   if (vol) {
     *vol = out;
@@ -102,7 +106,7 @@ cho::gen::SdfPtr GenerateSpace(const int num_boxes, const Eigen::Vector3f &eye,
 
   // Convert to a "wall" to create a valid geometry.
   // This gives thickness on our model of the negative space.
-  out = Onion::Create(out, 0.1f);
+  out = Onion::Create(out, 0.0001f);
 
   return out;
 }
@@ -342,8 +346,8 @@ auto O3dCloudFromVecVector3f(const std::vector<Eigen::Vector3f> &cloud_in) {
   if (true) {
     cloud_f.erase(std::remove_if(cloud_f.begin(), cloud_f.end(),
                                  [](const Eigen::Vector3f &v) -> bool {
-                                   return !v.allFinite() ||
-                                          (v.array().abs() >= 100).any();
+                                   return !v.allFinite();
+                                   // || (v.array().abs() >= 100).any();
                                  }),
                   cloud_f.end());
   }
@@ -361,10 +365,10 @@ int main() {
   // Configure ...
   static constexpr const float kDegree{M_PI / 180.0F};
   static constexpr const int kVerticalResolution{256};
-  static constexpr const int kHorizontalResolution{256};
+  static constexpr const int kHorizontalResolution{384};
   static constexpr const float kVerticalFov{120 * kDegree};
   static constexpr const float kHorizontalFov{210 * kDegree};
-  static constexpr const int kNumObjects{1};
+  static constexpr const int kNumObjects{8};
   static constexpr const bool kShow{true};
 
   // Initialize RNG.
@@ -411,11 +415,13 @@ int main() {
   scene_sdf->Compile(&program);
   Eigen::AngleAxisf q{0.1, Eigen::Vector3f::UnitZ()};
   Eigen::Isometry3f eye_pose_q{eye_pose};
-  for (int k = 0; k < 16; ++k) {
+#if 1
+  for (int k = 0; k < 1; ++k) {
     eye_pose_q = eye_pose_q * q;
     CreateDepthImageCuda(eye_pose_q, resolution, fov, program, &depth_image_cu,
                          &cloud_f_cu);
   }
+#endif
   auto t3 = std::chrono::high_resolution_clock::now();
 
 #if 1
@@ -425,78 +431,75 @@ int main() {
 
     auto cloud = O3dCloudFromVecVector3f(cloud_f_cu);
     vis.AddGeometry(cloud);
+
+    // axes
+    auto axes = open3d::geometry::TriangleMesh::CreateCoordinateFrame(
+        0.5, eye.cast<double>());
+    vis.AddGeometry(axes);
+
     Eigen::Isometry3f eye_pose_q{eye_pose};
     Eigen::AngleAxisf q{0.1, Eigen::Vector3f::UnitZ()};
+
     // for (int k = 0; k < 128; ++k) {
+    vis.GetViewControl().SetConstantZFar(100.0F);
+    vis.GetViewControl().SetConstantZNear(0.001F);
+    // vis.GetViewControl().SetZoom(1.0);
+
+    open3d::camera::PinholeCameraParameters p;
+    vis.GetViewControl().ConvertToPinholeCameraParameters(p);
+    p.extrinsic_.topRightCorner<3, 1>() = eye.cast<double>();
+    vis.GetViewControl().ConvertFromPinholeCameraParameters(p);
+
+    Eigen::Quaternionf q_axes = Eigen::Quaternionf::Identity();
     while (true) {
-      // hmmm...
-
-      // eye_pose_q.translation() = vis.GetViewControl()
-      //                               .GetViewMatrix()
-      //                               .topRightCorner<3, 1>()
-      //                               .cast<float>();
-
-      // fmt::print("FOV={}\n", vis.GetViewControl().GetFieldOfView());
-
-      // const Eigen::Matrix3f R = vis.GetViewControl()
-      //                              .GetViewMatrix()
-      //                              .topLeftCorner<3, 3>()
-      //                              .cast<float>();
-
-      // const auto M = vis.GetViewControl().GetViewMatrix();
-      // const Eigen::Matrix3f R =
-      //    M.topLeftCorner<3, 3>().cast<float>();  // optical_from_world
-
+      // NOTE(yycho0108): Camera params deduced here is not perfect,
+      // but I'm sick of dealing with the stupid and inconsistent open3d API.
       open3d::camera::PinholeCameraParameters p;
       vis.GetViewControl().ConvertToPinholeCameraParameters(p);
 
-      const Eigen::Matrix4f optical_from_world = p.extrinsic_.cast<float>();
+      const Eigen::Isometry3f optical_from_world{p.extrinsic_.cast<float>()};
 
-      Eigen::Matrix4f camera_from_optical = Eigen::Matrix4f::Identity();
-      camera_from_optical.topLeftCorner<3, 3>() =
-          (Eigen::AngleAxisf(-90 * kDegree, Eigen::Vector3f::UnitY()) *
-           Eigen::AngleAxisf(90 * kDegree, Eigen::Vector3f::UnitX()))
-              .toRotationMatrix()
-              .transpose();
-      const Eigen::Matrix4f world_from_camera =
-          (camera_from_optical * optical_from_world).inverse();
+      Eigen::Isometry3f optical_from_camera = Eigen::Isometry3f::Identity();
+      optical_from_camera =
+          Eigen::AngleAxisf(-90 * kDegree, Eigen::Vector3f::UnitY()) *
+          Eigen::AngleAxisf(90 * kDegree, Eigen::Vector3f::UnitX()) *
+          Eigen::Translation3f{0.0, 0.0, 0.0};
 
-      // const Eigen::Matrix3f R =
-      //    (Eigen::Matrix3f{} << vis.GetViewControl().GetRight().x(),
-      //     vis.GetViewControl().GetUp().x(),
-      //     vis.GetViewControl().GetFront().x(),
+      const Eigen::Isometry3f world_from_camera =
+          (optical_from_world.inverse() * optical_from_camera);
+      eye_pose_q = world_from_camera;
 
-      //     vis.GetViewControl().GetRight().y(),
-      //     vis.GetViewControl().GetUp().y(),
-      //     vis.GetViewControl().GetFront().y(),
+      // 1.4x factor to account for distortion
 
-      //     vis.GetViewControl().GetRight().z(),
-      //     vis.GetViewControl().GetUp().z(),
-      //     vis.GetViewControl().GetFront().z())
-      //        .finished();
-
-      // fmt::print("{}\n", R);
-      eye_pose_q.linear() = world_from_camera.topLeftCorner<3, 3>();
-
-      // Set translation
-      // eye_pose_q.translation().x() = vis.GetViewControl().GetEye().x();
-      // eye_pose_q.translation().y() = vis.GetViewControl().GetEye().y();
-      // eye_pose_q.translation().z() = vis.GetViewControl().GetEye().z();
-
-      eye_pose_q.translation() = world_from_camera.topRightCorner<3, 1>();
-
+      // p.intrinsic_.
       fov.array() = static_cast<float>(
-          2 * vis.GetViewControl().GetFieldOfView() * kDegree);
-      // fov.x() = 180 * kDegree;
-      // fov.y() = 360 * kDegree;
+          1.0 * vis.GetViewControl().GetFieldOfView() * kDegree);
+      // fov.array() = 90.0F * kDegree;
 
-      // eye_pose_q = eye_pose_q * q;
+#if 1
       CreateDepthImageCuda(eye_pose_q, resolution, fov, program,
                            &depth_image_cu, &cloud_f_cu);
+#else
+      depth_image_cu =
+          CreateDepthImage(eye_pose_q, resolution, fov, scene_sdf, &cloud_f_cu);
+#endif
 
       // hmm?
       auto cloud2 = O3dCloudFromVecVector3f(cloud_f_cu);
       cloud->points_ = cloud2->points_;
+
+#if 0
+      // Where the hell is the camera??
+      axes->Translate(world_from_camera.translation().cast<double>(), false);
+
+      const Eigen::Quaternionf delta =
+          Eigen::Quaternionf{world_from_camera.linear().cast<float>()} *
+          q_axes.inverse();
+      q_axes = delta * q_axes;
+      axes->Rotate(delta.toRotationMatrix().cast<double>(),
+                   world_from_camera.translation().cast<double>());
+      vis.UpdateGeometry(axes);
+#endif
 
       vis.UpdateGeometry(cloud);
       vis.PollEvents();
@@ -573,8 +576,9 @@ int main() {
       std::vector<Eigen::Vector3f> cloud = cloud_;
       cloud.erase(std::remove_if(cloud.begin(), cloud.end(),
                                  [](const Eigen::Vector3f &v) -> bool {
-                                   return !v.allFinite() ||
-                                          (v.array().abs() >= 100).any();
+                                   return !v.allFinite();
+                                   // return !v.allFinite() ||
+                                   //       (v.array().abs() >= 10).any();
                                  }),
                   cloud.end());
 

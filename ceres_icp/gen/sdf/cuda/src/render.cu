@@ -168,13 +168,22 @@ __global__ void RayMarchingDepthWithProgramKernel(
   float stack[STACK_SIZE];
 
   // Compute ray based on x,y, fov and resolution.
+#if 1
+  // Spherical?
   const float2 fov_step = fov / make_float2(res);
   const float2 angles = fov / -2.0F + make_float2(x, y) * fov_step;
   const float c = cos(angles.x);
   const float3 ray_local{c * cos(angles.y), c * sin(angles.y), sin(angles.x)};
+#else
+  // Projection mat
+  const float d = res.x / (2 * tan(fov.x / 2));  // focal distance...
+  const float3 ray_local =
+      normalize(make_float3(d, x - res.x / 2, y - res.y / 2));
+#endif
   const float3 ray = rotate(eye_q, ray_local);
 
   // Perform RayMarching.
+  bool hit = false;
   float depth = 0.0F;
   for (int i = 0; i < max_iter; ++i) {
     const float3 point = eye + depth * ray;
@@ -184,18 +193,26 @@ __global__ void RayMarchingDepthWithProgramKernel(
     const float offset = EvaluateSdf(ops, params, num_ops, stack, point);
 #endif
     if (offset < eps) {
+      hit = true;
       break;
     }
     depth += offset;
-    if (depth >= max_depth) {
-      depth = max_depth;
+
+    if (depth < 0 || depth >= max_depth) {
+      depth = 0;
       break;
     }
   }
 
+#if 0
+  if (!hit) {
+    depth = 0;
+  }
+#endif
+
   // Output!
   depth_image[index] = depth;
-  point_cloud[index] = depth * ray;
+  point_cloud[index] = eye + depth * ray;
 }
 
 __host__ void CreateDepthImageCuda(const Eigen::Isometry3f& camera_pose,
@@ -207,7 +224,7 @@ __host__ void CreateDepthImageCuda(const Eigen::Isometry3f& camera_pose,
 #if PROFILE_SECTIONS
   auto t0 = std::chrono::high_resolution_clock::now();
 #endif
-  
+
   // Determine number of params.
   int num_params{0};
   for (const auto& op : scene) {
@@ -259,7 +276,7 @@ __host__ void CreateDepthImageCuda(const Eigen::Isometry3f& camera_pose,
   RayMarchingDepthWithProgramKernel<<<blocks, threads, shmem_size>>>(
       eye, eye_q, res, fov, thrust::raw_pointer_cast(program.data()),
       program.size(), thrust::raw_pointer_cast(params.data()), params.size(),
-      512, 100, 1e-3, thrust::raw_pointer_cast(depth_image_buf.data()),
+      1024, 101.0, 1e-3, thrust::raw_pointer_cast(depth_image_buf.data()),
       reinterpret_cast<float3*>(
           thrust::raw_pointer_cast(point_cloud_buf.data())));
 #if PROFILE_SECTIONS
@@ -282,13 +299,13 @@ __host__ void CreateDepthImageCuda(const Eigen::Isometry3f& camera_pose,
 
 #if PROFILE_SECTIONS
   printf(
-     "PREP %d\n",
-     std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+      "PREP %d\n",
+      std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
   printf(
-     "KERNEL %d\n",
-     std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
+      "KERNEL %d\n",
+      std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
   printf(
-     "EXPORT %d\n",
-     std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count());
+      "EXPORT %d\n",
+      std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count());
 #endif
 }
