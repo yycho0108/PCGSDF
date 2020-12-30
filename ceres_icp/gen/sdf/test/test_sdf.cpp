@@ -337,14 +337,34 @@ Eigen::MatrixXf CreateDepthImage(const Eigen::Isometry3f &camera_pose,
   return out;
 }
 
+auto O3dCloudFromVecVector3f(const std::vector<Eigen::Vector3f> &cloud_in) {
+  std::vector<Eigen::Vector3f> cloud_f = cloud_in;
+  if (true) {
+    cloud_f.erase(std::remove_if(cloud_f.begin(), cloud_f.end(),
+                                 [](const Eigen::Vector3f &v) -> bool {
+                                   return !v.allFinite() ||
+                                          (v.array().abs() >= 100).any();
+                                 }),
+                  cloud_f.end());
+  }
+  std::vector<Eigen::Vector3d> cloud_d(cloud_f.size());
+  std::transform(cloud_f.begin(), cloud_f.end(), cloud_d.begin(),
+                 [](const Eigen::Vector3f &v) -> Eigen::Vector3d {
+                   return v.cast<double>();
+                 });
+  // open3d::geometry::PointCloud cloud_o3d;
+  auto cloud_o3d = std::make_shared<open3d::geometry::PointCloud>(cloud_d);
+  return cloud_o3d;
+}
+
 int main() {
   // Configure ...
   static constexpr const float kDegree{M_PI / 180.0F};
-  static constexpr const int kVerticalResolution{512};
-  static constexpr const int kHorizontalResolution{512};
-  static constexpr const float kVerticalFov{180 * kDegree};
-  static constexpr const float kHorizontalFov{360 * kDegree};
-  static constexpr const int kNumObjects{16};
+  static constexpr const int kVerticalResolution{256};
+  static constexpr const int kHorizontalResolution{256};
+  static constexpr const float kVerticalFov{120 * kDegree};
+  static constexpr const float kHorizontalFov{210 * kDegree};
+  static constexpr const int kNumObjects{1};
   static constexpr const bool kShow{true};
 
   // Initialize RNG.
@@ -356,11 +376,11 @@ int main() {
   rng.seed(seed);
 
   // Create camera.
-  const Eigen::Vector2i resolution{kVerticalResolution, kHorizontalResolution};
-  const Eigen::Vector2f fov{kVerticalFov, kHorizontalFov};
-  const Eigen::Vector3f eye{0, 0, 0};
-  const Eigen::AngleAxisf eye_rot{0 * kDegree, Eigen::Vector3f::UnitY()};
-  const Eigen::Isometry3f eye_pose{Eigen::Translation3f{eye} * eye_rot};
+  Eigen::Vector2i resolution{kVerticalResolution, kHorizontalResolution};
+  Eigen::Vector2f fov{kVerticalFov, kHorizontalFov};
+  Eigen::Vector3f eye{0, 0, 0};
+  Eigen::AngleAxisf eye_rot{0 * kDegree, Eigen::Vector3f::UnitY()};
+  Eigen::Isometry3f eye_pose{Eigen::Translation3f{eye} * eye_rot};
 
   // Create scene - take in camera parameter to avoid collision.
   fmt::print("Scene Generation Start.\n");
@@ -389,9 +409,102 @@ int main() {
   // CUDA
   std::vector<cho::gen::SdfData> program;
   scene_sdf->Compile(&program);
-  CreateDepthImageCuda(eye_pose, resolution, fov, program, &depth_image_cu,
-                       &cloud_f_cu);
+  Eigen::AngleAxisf q{0.1, Eigen::Vector3f::UnitZ()};
+  Eigen::Isometry3f eye_pose_q{eye_pose};
+  for (int k = 0; k < 16; ++k) {
+    eye_pose_q = eye_pose_q * q;
+    CreateDepthImageCuda(eye_pose_q, resolution, fov, program, &depth_image_cu,
+                         &cloud_f_cu);
+  }
   auto t3 = std::chrono::high_resolution_clock::now();
+
+#if 1
+  {
+    open3d::visualization::Visualizer vis;
+    vis.CreateVisualizerWindow();
+
+    auto cloud = O3dCloudFromVecVector3f(cloud_f_cu);
+    vis.AddGeometry(cloud);
+    Eigen::Isometry3f eye_pose_q{eye_pose};
+    Eigen::AngleAxisf q{0.1, Eigen::Vector3f::UnitZ()};
+    // for (int k = 0; k < 128; ++k) {
+    while (true) {
+      // hmmm...
+
+      // eye_pose_q.translation() = vis.GetViewControl()
+      //                               .GetViewMatrix()
+      //                               .topRightCorner<3, 1>()
+      //                               .cast<float>();
+
+      // fmt::print("FOV={}\n", vis.GetViewControl().GetFieldOfView());
+
+      // const Eigen::Matrix3f R = vis.GetViewControl()
+      //                              .GetViewMatrix()
+      //                              .topLeftCorner<3, 3>()
+      //                              .cast<float>();
+
+      // const auto M = vis.GetViewControl().GetViewMatrix();
+      // const Eigen::Matrix3f R =
+      //    M.topLeftCorner<3, 3>().cast<float>();  // optical_from_world
+
+      open3d::camera::PinholeCameraParameters p;
+      vis.GetViewControl().ConvertToPinholeCameraParameters(p);
+
+      const Eigen::Matrix4f optical_from_world = p.extrinsic_.cast<float>();
+
+      Eigen::Matrix4f camera_from_optical = Eigen::Matrix4f::Identity();
+      camera_from_optical.topLeftCorner<3, 3>() =
+          (Eigen::AngleAxisf(-90 * kDegree, Eigen::Vector3f::UnitY()) *
+           Eigen::AngleAxisf(90 * kDegree, Eigen::Vector3f::UnitX()))
+              .toRotationMatrix()
+              .transpose();
+      const Eigen::Matrix4f world_from_camera =
+          (camera_from_optical * optical_from_world).inverse();
+
+      // const Eigen::Matrix3f R =
+      //    (Eigen::Matrix3f{} << vis.GetViewControl().GetRight().x(),
+      //     vis.GetViewControl().GetUp().x(),
+      //     vis.GetViewControl().GetFront().x(),
+
+      //     vis.GetViewControl().GetRight().y(),
+      //     vis.GetViewControl().GetUp().y(),
+      //     vis.GetViewControl().GetFront().y(),
+
+      //     vis.GetViewControl().GetRight().z(),
+      //     vis.GetViewControl().GetUp().z(),
+      //     vis.GetViewControl().GetFront().z())
+      //        .finished();
+
+      // fmt::print("{}\n", R);
+      eye_pose_q.linear() = world_from_camera.topLeftCorner<3, 3>();
+
+      // Set translation
+      // eye_pose_q.translation().x() = vis.GetViewControl().GetEye().x();
+      // eye_pose_q.translation().y() = vis.GetViewControl().GetEye().y();
+      // eye_pose_q.translation().z() = vis.GetViewControl().GetEye().z();
+
+      eye_pose_q.translation() = world_from_camera.topRightCorner<3, 1>();
+
+      fov.array() = static_cast<float>(
+          2 * vis.GetViewControl().GetFieldOfView() * kDegree);
+      // fov.x() = 180 * kDegree;
+      // fov.y() = 360 * kDegree;
+
+      // eye_pose_q = eye_pose_q * q;
+      CreateDepthImageCuda(eye_pose_q, resolution, fov, program,
+                           &depth_image_cu, &cloud_f_cu);
+
+      // hmm?
+      auto cloud2 = O3dCloudFromVecVector3f(cloud_f_cu);
+      cloud->points_ = cloud2->points_;
+
+      vis.UpdateGeometry(cloud);
+      vis.PollEvents();
+      vis.UpdateRender();
+    }
+    return 0;
+  }
+#endif
 
 #if 0
   // CUDA+JIT

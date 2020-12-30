@@ -1,4 +1,14 @@
 cmake_minimum_required(VERSION 3.16)
+
+# CCACHE
+find_program(CCACHE "ccache")
+if(CCACHE)
+    message("CCACHE FOUND! = ${CCACHE}")
+    set(CMAKE_C_COMPILER_LAUNCHER ${CCACHE})
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE})
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CCACHE_PROGRAM}")
+endif(CCACHE)
+
 project(CeresIcp)
 
 # Configure ...
@@ -12,6 +22,8 @@ enable_language(CUDA)
 set(CMAKE_CUDA_STANDARD 11)
 enable_language(CUDA)
 check_language(CUDA)
+
+# add_definitions(-DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
 
 # HMM...
 # add_definitions(-D_GLIBCXX_USE_CXX11_ABI=0 )

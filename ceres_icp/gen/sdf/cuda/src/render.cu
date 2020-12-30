@@ -8,8 +8,10 @@
 #include "cho/gen/sdf_types.hpp"
 
 #define BLOCK_SIZE 32
-#define STACK_SIZE 128
+#define STACK_SIZE 32
 #define USE_SHMEM 1
+
+#define PROFILE_SECTIONS 0
 
 __device__ __inline__ void Push(float* const s, int& i, const float value) {
   s[++i] = value;
@@ -26,7 +28,9 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops,
   float3 p = point;
   int index{-1};
   for (int i = 0; i < n; ++i) {
-    // assert(index < 128);
+    // will break otherwise.
+    assert(index < STACK_SIZE);
+
     const SdfDataCompact& op = ops[i];
     const float* const param = params + op.param_offset;
     switch (op.code) {
@@ -200,7 +204,10 @@ __host__ void CreateDepthImageCuda(const Eigen::Isometry3f& camera_pose,
                                    const std::vector<cho::gen::SdfData>& scene,
                                    Eigen::MatrixXf* const depth,
                                    std::vector<Eigen::Vector3f>* const cloud) {
+#if PROFILE_SECTIONS
   auto t0 = std::chrono::high_resolution_clock::now();
+#endif
+  
   // Determine number of params.
   int num_params{0};
   for (const auto& op : scene) {
@@ -240,20 +247,26 @@ __host__ void CreateDepthImageCuda(const Eigen::Isometry3f& camera_pose,
   const dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
   const dim3 blocks((resolution.x() + threads.x - 1) / threads.x,
                     (resolution.y() + threads.y - 1) / threads.y);
-  // cudaDeviceSynchronize();
-  // auto t1 = std::chrono::high_resolution_clock::now();
+
+#if PROFILE_SECTIONS
+  cudaDeviceSynchronize();
+  auto t1 = std::chrono::high_resolution_clock::now();
+#endif
+
   // TODO(yycho0108): Remove hardcoded params `max_iter`, `max_depth`, `eps`.
   const int shmem_size =
       sizeof(SdfDataCompact) * program.size() + sizeof(float) * params.size();
   RayMarchingDepthWithProgramKernel<<<blocks, threads, shmem_size>>>(
       eye, eye_q, res, fov, thrust::raw_pointer_cast(program.data()),
       program.size(), thrust::raw_pointer_cast(params.data()), params.size(),
-      128, 100, 1e-3, thrust::raw_pointer_cast(depth_image_buf.data()),
+      512, 100, 1e-3, thrust::raw_pointer_cast(depth_image_buf.data()),
       reinterpret_cast<float3*>(
           thrust::raw_pointer_cast(point_cloud_buf.data())));
+#if PROFILE_SECTIONS
   // FIXME(yycho0108): Is this required?
-  // cudaDeviceSynchronize();
-  // auto t2 = std::chrono::high_resolution_clock::now();
+  cudaDeviceSynchronize();
+  auto t2 = std::chrono::high_resolution_clock::now();
+#endif
 
   // export data.
   depth->resize(resolution.x(), resolution.y());
@@ -262,15 +275,20 @@ __host__ void CreateDepthImageCuda(const Eigen::Isometry3f& camera_pose,
   cloud->resize(resolution.prod());
   thrust::copy(point_cloud_buf.begin(), point_cloud_buf.end(),
                reinterpret_cast<float*>(cloud->data()));
-  // auto t3 = std::chrono::high_resolution_clock::now();
+#if PROFILE_SECTIONS
+  cudaDeviceSynchronize();
+  auto t3 = std::chrono::high_resolution_clock::now();
+#endif
 
-  // printf(
-  //    "PREP %d\n",
-  //    std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
-  // printf(
-  //    "KERNEL %d\n",
-  //    std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
-  // printf(
-  //    "EXPORT %d\n",
-  //    std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count());
+#if PROFILE_SECTIONS
+  printf(
+     "PREP %d\n",
+     std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+  printf(
+     "KERNEL %d\n",
+     std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
+  printf(
+     "EXPORT %d\n",
+     std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count());
+#endif
 }
