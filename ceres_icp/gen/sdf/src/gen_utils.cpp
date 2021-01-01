@@ -14,6 +14,8 @@ cho::gen::SdfPtr GenerateSpace(std::default_random_engine &rng,
                                const int num_boxes, const Eigen::Vector3f &eye,
                                cho::gen::SdfPtr *const vol) {
   using namespace cho::gen;
+
+  // TODO(ycho): Expose these parameters.
   std::uniform_real_distribution<float> sdist{5.0, 15.0};
   std::uniform_real_distribution<float> udist{-10.0, 10.0};
 
@@ -62,7 +64,7 @@ cho::gen::SdfPtr GenerateSpace(std::default_random_engine &rng,
 
   // Convert to a "wall" to create a valid geometry.
   // This gives thickness on our model of the negative space.
-  out = Onion::Create(out, 0.001f);
+  out = Onion::Create(out, 0.1f);
 
   return out;
 }

@@ -231,27 +231,35 @@ bool GenerateTrajectoryImpl(const cho::gen::SdfPtr &space,
       auto delta = Eigen::AlignedBox3f{
           opts.max_edge_length * Eigen::Array3f{0, -0.25, -0.25},
           opts.max_edge_length * Eigen::Array3f{1, 0.25, 0.25}};
+      // TODO(yycho0108): Truncate `delta` to actual target edge length?
 
       p = trajectory->empty() ? aabb.sample()
                               : trajectory->back() * delta.sample();
       // Eigen::Vector3f{udist(rng) * opts.max_edge_length, 0.0,
       //                0.0};
 
+      // NOTE(yycho0108): `dmin` here is a somewhat arbitrary requirement
+      // that allows trajectory in the linear interpolation from the previous to
+      // current point will not be occupied.
+      // TODO(yycho0108): instead of hardcoding `kMaxDistance`,
+      // Precompute a heuristically determined "spacious" distance from N random
+      // samples.
+      const float dmin = trajectory->empty()
+                             ? kMaxDistance
+                             : (trajectory->back().translation() - p).norm();
+      // Alternative formulation:
       // Prefer a somewhat spacious locale, but decay this preference
       // over search iteration. (currently linearly decayed)
-
-      const float dmin = trajectory->empty()
-                             ? 0.0
-                             : (trajectory->back().translation() - p).norm();
-      const float target_distance = std::max(
-          0.0F, kMaxDistance * (opts.max_search - j) / opts.max_search);
-      if (space->Distance(p) > -target_distance) {
+      // const float target_distance = std::max(
+      //    dmin, kMaxDistance * (opts.max_search - j) / opts.max_search);
+      const float target_distance = std::max(0.0F, 1.0F * dmin);
+      if (space->Distance(p) >= -target_distance) {
         continue;
       }
-      // if (space->Distance(p) > 0) {
-      //  continue;
-      //}
+
+      // Found waypoint : exit loop.
       wpt_found = true;
+      break;
     }
 
     if (!wpt_found) {
@@ -280,7 +288,14 @@ bool GenerateTrajectory(const cho::gen::SdfPtr &space,
                         std::vector<Eigen::Isometry3f> *const trajectory) {
   const Eigen::AlignedBox3f aabb{space->Center().array() - space->Radius(),
                                  space->Center().array() + space->Radius()};
-  return detail::GenerateTrajectoryImpl(space, opts, aabb, 0.0F, trajectory);
+  const bool res =
+      detail::GenerateTrajectoryImpl(space, opts, aabb, 0.0F, trajectory);
+  if (res) {
+    for (const auto &wpt : *trajectory) {
+      fmt::print("D={}\n", space->Distance(wpt.translation()));
+    }
+  }
+  return res;
 }
 
 cho::gen::SdfPtr TrajectoryToSdf(
@@ -361,10 +376,11 @@ int main() {
   static constexpr const int kHorizontalResolution{256};
   static constexpr const float kVerticalFov{120 * kDegree};
   static constexpr const float kHorizontalFov{210 * kDegree};
-  static constexpr const int kNumObjects{1};
+  static constexpr const int kNumObjects{8};
   static constexpr const bool kShow{true};
-  static constexpr const bool kFollowTrajectory{false};
+  static constexpr const bool kFollowTrajectory{true};
   static constexpr const bool kShowTrajectory{true};
+  static constexpr const bool kUseFancyGui{true};
 
   // Initialize RNG.
   const std::int64_t seed =
@@ -372,6 +388,8 @@ int main() {
   // const std::int64_t seed = 0;
   // const std::int64_t seed = 1609268978845759618;
   // const std::int64_t seed = 1609529784716097929;
+  // const std::int64_t seed = 1609539747653922532;
+  // const std::int64_t seed = 1609540336680865385;
   fmt::print("seed={}\n", seed);
   rng.seed(seed);
 
@@ -403,7 +421,10 @@ int main() {
       GenerateTrajectory(free_space, traj_gen_opts, &trajectory);
   fmt::print("Trajectory Generation End : {}.\n",
              traj_gen_suc ? "success" : "failed");
-  // scene_sdf = cho::gen::Union::Create(wall, TrajectoryToSdf(trajectory));
+
+  // NOTE(yycho0108): kShowTrajectory is disabled if following trajectory,
+  // since the primitives generated for showing the trajectory would
+  // occlude the camera.
   if (!kFollowTrajectory && kShowTrajectory) {
     scene_sdf = cho::gen::Union::Create(scene_sdf, TrajectoryToSdf(trajectory));
   }
@@ -431,17 +452,14 @@ int main() {
   scene_sdf->Compile(&program);
   Eigen::AngleAxisf q{0.1, Eigen::Vector3f::UnitZ()};
   Eigen::Isometry3f eye_pose_q{eye_pose};
-#if 1
   for (int k = 0; k < 1; ++k) {
     eye_pose_q = eye_pose_q * q;
     CreateDepthImageCuda(eye_pose_q, resolution, fov, program, &depth_image_cu,
                          &cloud_f_cu);
   }
-#endif
   auto t3 = std::chrono::high_resolution_clock::now();
 
-#if 1
-  {
+  if (kUseFancyGui) {
     SdfDepthImageRendererCu depth_renderer{program, resolution, fov};
 
     open3d::visualization::VisualizerWithKeyCallback vis;
@@ -481,7 +499,7 @@ int main() {
         fmt::print("fps = {}\n", fps);
       }
 
-      // hmm...
+      // Follow a linearly interpolated trajectory.
       if (kFollowTrajectory && !trajectory.empty()) {
         static constexpr const int kTimePerWaypointMs{200};
         const std::int64_t t =
@@ -548,7 +566,6 @@ int main() {
     }
     return 0;
   }
-#endif
 
 #if 0
   // CUDA+JIT

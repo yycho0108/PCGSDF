@@ -27,9 +27,11 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops,
 
   float3 p = point;
   int index{-1};
+  // int max_index{0};
   for (int i = 0; i < n; ++i) {
     // will break otherwise.
     assert(index < STACK_SIZE);
+    // max_index=max(index,max_index);
 
     const SdfDataCompact& op = ops[i];
     const float* const param = params + op.param_offset;
@@ -91,7 +93,7 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops,
       case Op::SUBTRACTION: {
         const float d0 = Pop(s, index);
         const float d1 = Pop(s, index);
-        Push(s, index, max(-d0, d1));
+        Push(s, index, max(d0, -d1));
         break;
       }
       case Op::ONION: {
@@ -125,13 +127,14 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops,
       }
       case Op::SCALE_END: {
         const float d = Pop(s, index);
-        Push(s, index, d / param[0]);
+        Push(s, index, d * param[0]);
         // restore `point` for the suptree.
         p *= param[0];
         break;
       }
     }
   }
+  // printf("MAX STACK @ %d\n", max_index);
 
   // Eqivalent to return Pop(s,index);
   return s[0];
@@ -202,10 +205,11 @@ __global__ void RayMarchingDepthWithProgramKernel(
       break;
     }
 
-    if (depth < 0) {
-      depth = 0;
-      break;
-    }
+    // if (depth < 0) {
+    //  printf("Somehow inside, abort\n");
+    //  depth = 0;
+    //  break;
+    //}
 
     if (depth >= max_depth) {
       depth = max_depth;
@@ -213,7 +217,7 @@ __global__ void RayMarchingDepthWithProgramKernel(
     }
   }
 
-#if 1
+#if 0
   if (!hit) {
     depth = 0;
   }
@@ -277,18 +281,18 @@ SdfDepthImageRendererCu::Impl::Impl(const std::vector<cho::gen::SdfData>& scene,
   SetResolution(resolution);
   SetFov(fov);
 
-  // Reset device buffer for scene.
-  program.resize(scene.size());
-
   // Translate program into compact form.
   int op_index{0};
   int param_index{0};
+  thrust::host_vector<SdfDataCompact> program_h;
   thrust::host_vector<float> param_h;
+  program_h.resize(scene.size());
   for (const auto& op : scene) {
     // Set program op.
-    program[op_index] = SdfDataCompact{op.code, param_index};
+    program_h[op_index] = SdfDataCompact{op.code, param_index};
 
     // Copy parameters to contiguous buffer.
+    printf("%d==%d\n", param_index, param_h.size());
     param_h.insert(param_h.end(), op.param.begin(), op.param.end());
 
     // Increment indices for populating the next op.
@@ -297,17 +301,17 @@ SdfDepthImageRendererCu::Impl::Impl(const std::vector<cho::gen::SdfData>& scene,
   }
 
   // Copy to device memory.
-  params.resize(param_h.size());
-  thrust::copy(param_h.begin(), param_h.end(), params.begin());
-
-  // Allocate output buffers as well.
-  depth_image_buf.resize(resolution.prod());
-  point_cloud_buf.resize(resolution.prod() * 3);
+  program = program_h;
+  params = param_h;
 }
 
 void SdfDepthImageRendererCu::Impl::SetResolution(
     const Eigen::Vector2i& resolution) {
-  res = int2{resolution.x(), resolution.y()};
+  this->res = int2{resolution.x(), resolution.y()};
+
+  // Modifying resolution triggers allocation of output buffers as well.
+  depth_image_buf.resize(resolution.prod());
+  point_cloud_buf.resize(resolution.prod() * 3);
 }
 
 void SdfDepthImageRendererCu::Impl::SetFov(const Eigen::Vector2f& fov) {
@@ -334,7 +338,7 @@ void SdfDepthImageRendererCu::Impl::Render(
   RayMarchingDepthWithProgramKernel<<<blocks, threads, shmem_size>>>(
       eye, eye_q, res, fov, thrust::raw_pointer_cast(program.data()),
       program.size(), thrust::raw_pointer_cast(params.data()), params.size(),
-      1024, 100.0, 1e-2, thrust::raw_pointer_cast(depth_image_buf.data()),
+      36, 100.0, 1e-2, thrust::raw_pointer_cast(depth_image_buf.data()),
       reinterpret_cast<float3*>(
           thrust::raw_pointer_cast(point_cloud_buf.data())));
 
