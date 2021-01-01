@@ -50,8 +50,8 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops,
       case Op::CYLINDER: {
         const float radius = param[0];
         const float height = param[1];
-        const float2 d = {sqrt(p.x * p.x + p.y * p.y) - radius,
-                          std::abs(p.z) - height};
+        const float2 d{sqrt(p.x * p.x + p.y * p.y) - radius,
+                       std::abs(p.z) - height};
         Push(s, index, min(max(d), 0.0F) + length(max(d, 0.0F)));
         break;
       }
@@ -75,6 +75,10 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops,
       case Op::UNION: {
         const float d0 = Pop(s, index);
         const float d1 = Pop(s, index);
+        // const float out =
+        //    d0 > 0 ? (d1 > 0 ? d0 * d1 / sqrt(d0 * d0 + d1 * d1) : d1)
+        //           : (d1 > 0 ? d0 : -sqrt(d0 * d0 + d1 * d1));
+        // Push(s, index, out);
         Push(s, index, min(d0, d1));
         break;
       }
@@ -109,8 +113,8 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops,
         break;
       }
       case Op::TRANSFORMATION: {
-        const float4 q = make_float4(param[0], param[1], param[2], param[3]);
-        const float3 v = make_float3(param[4], param[5], param[6]);
+        const float4 q{param[0], param[1], param[2], param[3]};
+        const float3 v{param[4], param[5], param[6]};
         p = rotate(q, p) + v;
         break;
       }
@@ -192,19 +196,24 @@ __global__ void RayMarchingDepthWithProgramKernel(
 #else
     const float offset = EvaluateSdf(ops, params, num_ops, stack, point);
 #endif
+    depth += offset;
     if (offset < eps) {
       hit = true;
       break;
     }
-    depth += offset;
 
-    if (depth < 0 || depth >= max_depth) {
+    if (depth < 0) {
       depth = 0;
+      break;
+    }
+
+    if (depth >= max_depth) {
+      depth = max_depth;
       break;
     }
   }
 
-#if 0
+#if 1
   if (!hit) {
     depth = 0;
   }
@@ -268,30 +277,28 @@ SdfDepthImageRendererCu::Impl::Impl(const std::vector<cho::gen::SdfData>& scene,
   SetResolution(resolution);
   SetFov(fov);
 
-  // Determine number of params.
-  int num_params{0};
-  for (const auto& op : scene) {
-    num_params += op.param.size();
-  }
-
-  // Reset device buffer for scene
-  params.resize(num_params);
+  // Reset device buffer for scene.
   program.resize(scene.size());
 
   // Translate program into compact form.
   int op_index{0};
   int param_index{0};
+  thrust::host_vector<float> param_h;
   for (const auto& op : scene) {
     // Set program op.
     program[op_index] = SdfDataCompact{op.code, param_index};
-    // Copy parameters.
-    thrust::copy(op.param.begin(), op.param.end(),
-                 params.begin() + param_index);
+
+    // Copy parameters to contiguous buffer.
+    param_h.insert(param_h.end(), op.param.begin(), op.param.end());
 
     // Increment indices for populating the next op.
     param_index += op.param.size();
     ++op_index;
   }
+
+  // Copy to device memory.
+  params.resize(param_h.size());
+  thrust::copy(param_h.begin(), param_h.end(), params.begin());
 
   // Allocate output buffers as well.
   depth_image_buf.resize(resolution.prod());
@@ -327,7 +334,7 @@ void SdfDepthImageRendererCu::Impl::Render(
   RayMarchingDepthWithProgramKernel<<<blocks, threads, shmem_size>>>(
       eye, eye_q, res, fov, thrust::raw_pointer_cast(program.data()),
       program.size(), thrust::raw_pointer_cast(params.data()), params.size(),
-      16, 100.0, 1e-3, thrust::raw_pointer_cast(depth_image_buf.data()),
+      1024, 100.0, 1e-2, thrust::raw_pointer_cast(depth_image_buf.data()),
       reinterpret_cast<float3*>(
           thrust::raw_pointer_cast(point_cloud_buf.data())));
 

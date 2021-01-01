@@ -9,237 +9,26 @@
 #include <open3d/geometry/PointCloud.h>
 #include <open3d/geometry/TriangleMesh.h>
 #include <open3d/visualization/utility/DrawGeometry.h>
-#include <open3d/visualization/visualizer/Visualizer.h>
+// #include <open3d/visualization/visualizer/Visualizer.h>
+#include <open3d/visualization/visualizer/VisualizerWithKeyCallback.h>
 
-#include "cho/gen/ray_marching.hpp"
-#include "cho/gen/sdf.hpp"
+// Only for key codes
+#include <GLFW/glfw3.h>
 
 #include "cho/gen/cuda/render.hpp"
+#include "cho/gen/gen_utils.hpp"
+#include "cho/gen/ray_marching.hpp"
+#include "cho/gen/sdf.hpp"
+#include "cho/gen/sdf_utils.hpp"
 // #include "cho/gen/cuda/render_jit.hpp"
 
 std::default_random_engine rng;
 
-float ComputeSdfVolumeMonteCarlo(const cho::gen::SdfPtr &sdf,
-                                 const int num_samples) {
-  const Eigen::AlignedBox3f aabb{sdf->Center().array() - sdf->Radius(),
-                                 sdf->Center().array() + sdf->Radius()};
-  int count{0};
-  for (int i = 0; i < num_samples; ++i) {
-    count += (sdf->Distance(aabb.sample()) > 0);
-  }
-  return count / num_samples * std::pow(2 * sdf->Radius(), 3);
-}
-
-cho::gen::SdfPtr MakeTangentApprox(const cho::gen::SdfPtr &source,
-                                   const cho::gen::SdfPtr &target,
-                                   const bool force_tangent = false) {
-  const Eigen::Vector3f delta = target->Center() - source->Center();
-  const float d1 = source->Distance(target->Center());
-  const float d2 = target->Distance(source->Center());
-  const float offset = (d1 + d2 - delta.norm());
-  // Don't `maketangent` if already intersecting
-  if (force_tangent || offset > 0) {
-    return cho::gen::Transformation::Create(
-        source, Eigen::Translation3f{delta.normalized() * offset});
-  }
-  return source;
-}
-
-template <typename Iterator>
-cho::gen::SdfPtr UnionTree(Iterator i0, Iterator i1) {
-  const int d = std::distance(i0, i1);
-  if (d <= 1) {
-    return *i0;
-  }
-  auto im = std::next(i0, d / 2);
-  return cho::gen::Union::Create(UnionTree(i0, im), UnionTree(im, i1));
-}
-
-cho::gen::SdfPtr GenerateSpace(const int num_boxes, const Eigen::Vector3f &eye,
-                               cho::gen::SdfPtr *const vol) {
-  using namespace cho::gen;
-  std::uniform_real_distribution<float> sdist{5.0, 15.0};
-  std::uniform_real_distribution<float> udist{-10.0, 10.0};
-
-  std::vector<SdfPtr> rooms;
-  rooms.reserve(num_boxes);
-  SdfPtr out;
-  while (rooms.size() < num_boxes) {
-    std::array<float, traits<Box>::DoF> a;
-    std::generate(a.begin(), a.end(), [&udist]() { return udist(rng); });
-    auto room = Box::CreateFromArray(a);
-    // fmt::print("Room radius = {}\n", room->Radius());
-
-    // Adjust size.
-    const float target_radius = sdist(rng);
-    room = Scale::Create(room, target_radius / room->Radius());
-
-    // Transform ...
-    const Eigen::Vector3f pos{udist(rng), udist(rng), udist(rng)};
-    room = Transformation::Create(room, Eigen::Translation3f{pos});
-
-    if (rooms.empty()) {
-      // Initial room must contain camera.
-      if (room->Distance(eye) > 0) {
-        continue;
-      }
-      out = room;
-      rooms.emplace_back(room);
-    } else {
-      room = MakeTangentApprox(room, out, false);
-      out = Union::Create(out, room);
-      rooms.emplace_back(room);
-    }
-  }
-
-  // Rebuild out from balanced tree of unions.
-  out = UnionTree(rooms.begin(), rooms.end());
-
-  // out = Sphere::Create(30.0F);
-  // out = Plane::Create(Eigen::Vector3f::UnitZ(), 1.0F);
-  // out = Box::Create(Eigen::Vector3f{5.0, 5.0, 5.0});
-
-  // vol == occupied internal volume
-  if (vol) {
-    *vol = out;
-  }
-
-  // Convert to a "wall" to create a valid geometry.
-  // This gives thickness on our model of the negative space.
-  out = Onion::Create(out, 0.0001f);
-
-  return out;
-}
-
-cho::gen::SdfPtr GenerateObject(const int num_primitives,
-                                const cho::gen::SdfPtr &scene,
-                                const cho::gen::SdfPtr &scene_vol,
-                                const Eigen::Vector3f &eye) {
-  using namespace cho::gen;
-
-  SdfPtr out{nullptr};
-
-  const float sr = scene->Radius();
-  // const float sr = 10.0F;
-  const Eigen::AlignedBox3f scene_box{
-      scene->Center() - sr * Eigen::Vector3f::Ones(),
-      scene->Center() + sr * Eigen::Vector3f::Ones()};
-
-  // NOTE(yycho0108): Object radius ~ 0.1x scene radius
-  // std::uniform_real_distribution<float> udist{-0.1F * sr, 0.1F * sr};
-  std::uniform_real_distribution<float> udist{-2, 2};
-  std::uniform_int_distribution<int> sdf_type{0, 2};
-
-  std::vector<SdfPtr> parts;
-  while (parts.size() < num_primitives) {
-    // Generate primitive.
-    // TODO(yycho0108): Decay primitive size as a function of hierarchy?
-    auto t = sdf_type(rng);
-    // t = 0;
-    SdfPtr sdf;
-    switch (t) {
-      case 0: {
-        std::array<float, traits<Sphere>::DoF> a;
-        std::generate(a.begin(), a.end(), [&udist]() { return udist(rng); });
-        sdf = Sphere::CreateFromArray(a);
-        break;
-      }
-      case 1: {
-        std::array<float, traits<Box>::DoF> a;
-        std::generate(a.begin(), a.end(), [&udist]() { return udist(rng); });
-        sdf = Box::CreateFromArray(a);
-        break;
-      }
-      case 2: {
-        std::array<float, traits<Cylinder>::DoF> a;
-        std::generate(a.begin(), a.end(), [&udist]() { return udist(rng); });
-        sdf = Cylinder::CreateFromArray(a);
-        break;
-      }
-      default: {
-        throw std::out_of_range("out of range!");
-        break;
-      }
-    }
-
-    // Initialize ...
-    if (!out) {
-      // Sample initial position from ~approx free space in scene
-      Eigen::Vector3f pos = scene_box.sample();
-
-      // If volume information is available, sample from "inside"
-      if (scene_vol) {
-        do {
-          pos = scene_box.sample();
-        } while (scene_vol->Distance(pos) > 0);
-      }
-
-      sdf = Transformation::Create(
-          sdf, Eigen::Translation3f{pos} * Eigen::Quaternionf::UnitRandom());
-
-      // Reject sdfs that include `eye` ...
-      if (sdf->Distance(eye) <= 0) {
-        continue;
-      }
-      out = sdf;
-      parts.emplace_back(sdf);
-      continue;
-    }
-
-    // Generate "reasonable" translation.
-    const float rR = out->Radius() + sdf->Radius();
-    const Eigen::AlignedBox3f box{Eigen::Vector3f{-rR, -rR, -rR},
-                                  Eigen::Vector3f{+rR, +rR, +rR}};
-    Eigen::Vector3f offset;
-    do {
-      offset = box.sample();
-    } while (offset.squaredNorm() >= rR * rR);
-    const Eigen::Vector3f pos = out->Center() + offset;
-
-    // Apply transform.
-    sdf = Transformation::Create(
-        sdf, Eigen::Translation3f{pos} * Eigen::Quaternionf::UnitRandom());
-    if (sdf->Distance(eye) <= 0) {
-      continue;
-    }
-
-    // debug-only construct .
-    // if (!dbg) {
-    //  auto d = out->Center() - sdf->Center();
-    //  auto cyl = Cylinder::Create(0.5 * d.norm(), 0.1f);
-    //  cyl = Transformation::Create(
-    //      cyl, Eigen::Translation3f{0.5 * (out->Center() + sdf->Center())} *
-    //               Eigen::Quaternionf::FromTwoVectors(Eigen::Vector3f::UnitZ(),
-    //                                                  d.normalized()));
-    //  dbg = cyl;
-    //} else {
-    //  auto d = out->Center() - sdf->Center();
-    //  auto cyl = Cylinder::Create(0.5 * d.norm(), 0.1f);
-    //  cyl = Transformation::Create(
-    //      cyl, Eigen::Translation3f{0.5 * (out->Center() + sdf->Center())} *
-    //               Eigen::Quaternionf::FromTwoVectors(Eigen::Vector3f::UnitZ(),
-    //                                                  d.normalized()));
-    //  dbg = Union::Create(dbg, cyl);
-    //}
-
-    // Merge.
-    sdf = MakeTangentApprox(sdf, out);
-    out = Union::Create(out, sdf);
-    parts.emplace_back(sdf);
-    // out = SmoothUnion::Create(out, sdf, 0.25f);
-  }
-
-  out = UnionTree(parts.begin(), parts.end());
-
-  // if (dbg) {
-  //  out = Union::Create(out, dbg);
-  //}
-  return out;
-}
-
 cho::gen::SdfPtr CreateDefaultScene(const Eigen::Vector3f &eye,
                                     const int num_objects,
-                                    cho::gen::SdfPtr *const objs_out) {
+                                    cho::gen::SdfPtr *const objs_out,
+                                    cho::gen::SdfPtr *const free_space,
+                                    cho::gen::SdfPtr *const wall) {
   using namespace cho::gen;
 
 #if 0
@@ -247,11 +36,17 @@ cho::gen::SdfPtr CreateDefaultScene(const Eigen::Vector3f &eye,
   SdfPtr vol = room;
   // room = Transformation::Create(room, Eigen::Translation3f{ 0, 0, 10 });
   room = Onion::Create(room, 0.1f);
-  // room = Negation::Create(room, 0.1f);
+  // room = Negation::Crea(room, 0.1f);
   fmt::print("RC = {}\n", room->Center().transpose());
 #else
   SdfPtr vol{nullptr};
-  auto room = GenerateSpace(5, eye, &vol);
+  auto space = cho::gen::GenerateSpace(rng, 5, eye, &vol);
+  if (free_space) {
+    *free_space = vol;
+  }
+  if (wall) {
+    *wall = space;
+  }
 #endif
 
   // auto ground = Plane::Create(Eigen::Vector3f::UnitZ(), 0.0F);
@@ -265,7 +60,7 @@ cho::gen::SdfPtr CreateDefaultScene(const Eigen::Vector3f &eye,
 
   // return GenerateObject(6, eye);
 
-  SdfPtr scene{room};
+  SdfPtr scene{space};
   // SdfPtr scene{ ground };
   // scene = Union::Create(scene, wall0);
   // scene = Union::Create(scene, wall1);
@@ -273,13 +68,14 @@ cho::gen::SdfPtr CreateDefaultScene(const Eigen::Vector3f &eye,
   // scene = Union::Create(scene, wall3);
   // scene = Union::Create(scene, pillar0);
   // return scene;
+  //
 
   // Generate Objects.
   std::uniform_int_distribution ndist{1, 8};
   std::vector<SdfPtr> objects;
   SdfPtr objs;
   for (int i = 0; i < num_objects; ++i) {
-    auto obj = GenerateObject(ndist(rng), scene, vol, eye);
+    auto obj = cho::gen::GenerateObject(rng, ndist(rng), scene, vol, eye);
     objects.emplace_back(obj);
   }
   objs = UnionTree(objects.begin(), objects.end());
@@ -361,21 +157,221 @@ auto O3dCloudFromVecVector3f(const std::vector<Eigen::Vector3f> &cloud_in) {
   return cloud_o3d;
 }
 
+struct TrajectoryGenerationOptions {
+  int max_search;
+  int max_depth;
+  float max_length;
+
+  float max_edge_length;
+  float max_edge_angle;
+};
+
+namespace detail {
+bool GenerateTrajectoryImpl(const cho::gen::SdfPtr &space,
+                            const TrajectoryGenerationOptions &opts,
+                            const Eigen::AlignedBox3f &aabb,
+                            const float cur_length,
+                            std::vector<Eigen::Isometry3f> *const trajectory) {
+  static constexpr const float kMaxDistance{4.0};
+
+  static float cur_max{0.0};
+  // Check for success.
+  const bool is_long = cur_length >= opts.max_length;
+  cur_max = std::max(cur_length, cur_max);
+  if (is_long || trajectory->size() >= opts.max_depth) {
+    return is_long;
+  }
+
+  // Prune "impossible" cases.
+  const int num_remaining_edges = (opts.max_depth - trajectory->size());
+  const float max_future_length =
+      cur_length + opts.max_edge_length * num_remaining_edges;
+  // fmt::print("{} {}\n", opts.max_edge_length, num_remaining_edges);
+  // fmt::print("Currently @ {}/{}/{}/{}\n", cur_length, max_future_length,
+  // cur_max, opts.max_length);
+  if (max_future_length < opts.max_length) {
+    return false;
+  }
+
+  // Determine random sampling box.
+  const Eigen::AlignedBox3f &search_box =
+      trajectory->empty()
+          ? aabb
+          : Eigen::AlignedBox3f{
+                trajectory->back().translation().array() - opts.max_edge_length,
+                trajectory->back().translation().array() +
+                    opts.max_edge_length};
+
+  std::uniform_real_distribution<float> udist{0.0, 1.0};
+  for (int i = 0; i < opts.max_search; ++i) {
+    // Generate Waypoint.
+    Eigen::Vector3f p;
+    Eigen::Quaternionf q;
+    bool wpt_found{false};
+    for (int j = 0; j < opts.max_search; ++j) {
+      // p = search_box.sample();
+      // if (space->Distance(p) > 0) {
+      //  continue;
+      //}
+
+      // Generate orientation.
+      if (trajectory->empty()) {
+        q = Eigen::Quaternionf::UnitRandom();
+      } else {
+        const Eigen::Vector3f rpy =
+            opts.max_edge_angle * (Eigen::Array3f::Random() - 0.5F);
+        q = trajectory->back().linear() *
+            Eigen::AngleAxisf{rpy.x(), Eigen::Vector3f::UnitX()} *
+            Eigen::AngleAxisf{rpy.y(), Eigen::Vector3f::UnitY()} *
+            // NOTE(yycho0108): Reduce roll component since it's so
+            // disorienting...
+            Eigen::AngleAxisf{0.25F * rpy.z(), Eigen::Vector3f::UnitZ()};
+      }
+
+      auto delta = Eigen::AlignedBox3f{
+          opts.max_edge_length * Eigen::Array3f{0, -0.25, -0.25},
+          opts.max_edge_length * Eigen::Array3f{1, 0.25, 0.25}};
+
+      p = trajectory->empty() ? aabb.sample()
+                              : trajectory->back() * delta.sample();
+      // Eigen::Vector3f{udist(rng) * opts.max_edge_length, 0.0,
+      //                0.0};
+
+      // Prefer a somewhat spacious locale, but decay this preference
+      // over search iteration. (currently linearly decayed)
+
+      const float dmin = trajectory->empty()
+                             ? 0.0
+                             : (trajectory->back().translation() - p).norm();
+      const float target_distance = std::max(
+          0.0F, kMaxDistance * (opts.max_search - j) / opts.max_search);
+      if (space->Distance(p) > -target_distance) {
+        continue;
+      }
+      // if (space->Distance(p) > 0) {
+      //  continue;
+      //}
+      wpt_found = true;
+    }
+
+    if (!wpt_found) {
+      continue;
+    }
+
+    // Try to go down this route.
+    const float edge_length =
+        trajectory->empty() ? 0.0F
+                            : (p - trajectory->back().translation()).norm();
+    trajectory->emplace_back(Eigen::Translation3f{p} * q);
+
+    // Return if success.
+    if (GenerateTrajectoryImpl(space, opts, aabb, cur_length + edge_length,
+                               trajectory)) {
+      return true;
+    }
+    trajectory->pop_back();
+  }
+  return false;
+}
+}  // namespace detail
+
+bool GenerateTrajectory(const cho::gen::SdfPtr &space,
+                        const TrajectoryGenerationOptions &opts,
+                        std::vector<Eigen::Isometry3f> *const trajectory) {
+  const Eigen::AlignedBox3f aabb{space->Center().array() - space->Radius(),
+                                 space->Center().array() + space->Radius()};
+  return detail::GenerateTrajectoryImpl(space, opts, aabb, 0.0F, trajectory);
+}
+
+cho::gen::SdfPtr TrajectoryToSdf(
+    const std::vector<Eigen::Isometry3f> &trajectory) {
+  if (trajectory.size() < 2) {
+    return nullptr;
+  }
+
+  std::vector<cho::gen::SdfPtr> sdfs;
+  sdfs.reserve(trajectory.size() - 1);
+
+  auto it_prv = trajectory.begin();
+  for (auto it = std::next(it_prv); it != trajectory.end(); ++it) {
+    const auto &prv = *it_prv;
+    const auto &cur = *it;
+
+    const Eigen::Vector3f delta = cur.translation() - prv.translation();
+
+    const Eigen::Quaternionf q = Eigen::Quaternionf::FromTwoVectors(
+        Eigen::Vector3f::UnitZ(), delta.normalized());
+    fmt::print("Q = {} {} {} {}\n", q.x(), q.y(), q.z(), q.w());
+    const Eigen::Vector3f t = 0.5F * (cur.translation() + prv.translation());
+
+    auto sdf = cho::gen::Cylinder::Create(0.5F * delta.norm(), 0.1F);
+    sdf = cho::gen::Transformation::Create(sdf, Eigen::Translation3f{t} * q);
+    sdfs.emplace_back(sdf);
+    it_prv = it;
+  }
+  return UnionTree(sdfs.begin(), sdfs.end());
+}
+
+Eigen::Isometry3f GetCameraPose(open3d::visualization::Visualizer *const v) {
+  static const Eigen::Quaternionf optical_from_camera =
+      Eigen::AngleAxisf(-M_PI / 2, Eigen::Vector3f::UnitY()) *
+      Eigen::AngleAxisf(M_PI / 2, Eigen::Vector3f::UnitX());
+
+  open3d::camera::PinholeCameraParameters p;
+  v->GetViewControl().ConvertToPinholeCameraParameters(p);
+
+  const Eigen::Isometry3f optical_from_world{p.extrinsic_.cast<float>()};
+  const Eigen::Isometry3f world_from_camera =
+      (optical_from_world.inverse() * optical_from_camera);
+  return world_from_camera;
+}
+
+void SetCameraPose(open3d::visualization::Visualizer *const v,
+                   const Eigen::Isometry3f &camera_pose) {
+  static const Eigen::Quaternionf optical_from_camera =
+      Eigen::AngleAxisf(-M_PI / 2, Eigen::Vector3f::UnitY()) *
+      Eigen::AngleAxisf(M_PI / 2, Eigen::Vector3f::UnitX());
+
+  // Get
+  open3d::camera::PinholeCameraParameters p;
+  v->GetViewControl().ConvertToPinholeCameraParameters(p);
+  // Modify
+  const Eigen::Isometry3f &world_from_camera = camera_pose;
+  const Eigen::Isometry3f optical_from_world =
+      optical_from_camera * world_from_camera.inverse();
+  p.extrinsic_ = optical_from_world.matrix()
+                     .cast<std::decay_t<decltype(*p.extrinsic_.data())> >();
+  // Set
+  v->GetViewControl().ConvertFromPinholeCameraParameters(p);
+}
+
+Eigen::Isometry3f Lerp(const Eigen::Isometry3f &x0, const Eigen::Isometry3f &x1,
+                       const float w) {
+  const Eigen::Vector3f d =
+      x0.translation() + w * (x1.translation() - x0.translation());
+  const Eigen::Quaternionf q =
+      Eigen::Quaternionf{x0.linear()}.slerp(w, Eigen::Quaternionf{x1.linear()});
+  return Eigen::Isometry3f{Eigen::Translation3f{d} * q};
+}
+
 int main() {
   // Configure ...
   static constexpr const float kDegree{M_PI / 180.0F};
-  static constexpr const int kVerticalResolution{128};
-  static constexpr const int kHorizontalResolution{128};
+  static constexpr const int kVerticalResolution{256};
+  static constexpr const int kHorizontalResolution{256};
   static constexpr const float kVerticalFov{120 * kDegree};
   static constexpr const float kHorizontalFov{210 * kDegree};
-  static constexpr const int kNumObjects{8};
+  static constexpr const int kNumObjects{1};
   static constexpr const bool kShow{true};
+  static constexpr const bool kFollowTrajectory{false};
+  static constexpr const bool kShowTrajectory{true};
 
   // Initialize RNG.
-  // const std::int64_t seed =
-  //    std::chrono::high_resolution_clock::now().time_since_epoch().count();
+  const std::int64_t seed =
+      std::chrono::high_resolution_clock::now().time_since_epoch().count();
   // const std::int64_t seed = 0;
-  const std::int64_t seed = 1609268978845759618;
+  // const std::int64_t seed = 1609268978845759618;
+  // const std::int64_t seed = 1609529784716097929;
   fmt::print("seed={}\n", seed);
   rng.seed(seed);
 
@@ -389,8 +385,28 @@ int main() {
   // Create scene - take in camera parameter to avoid collision.
   fmt::print("Scene Generation Start.\n");
   cho::gen::SdfPtr objs;
-  auto scene_sdf = CreateDefaultScene(eye, kNumObjects, &objs);
+  cho::gen::SdfPtr space;
+  cho::gen::SdfPtr wall;
+  auto scene_sdf = CreateDefaultScene(eye, kNumObjects, &objs, &space, &wall);
   fmt::print("Scene Generation End.\n");
+
+  // Create trajectory.
+  // auto dummy = cho::gen::Sphere::Create(0.001);
+  cho::gen::SdfPtr free_space = cho::gen::Subtraction::Create(space, objs);
+  // cho::gen::SdfPtr free_space = space;
+  // subtraction == Intersection(A, Negation(B))
+  // == max(A, Negation(B))
+  fmt::print("Trajectory Generation Start.\n");
+  std::vector<Eigen::Isometry3f> trajectory;
+  TrajectoryGenerationOptions traj_gen_opts{128, 16, 16.0F, 2.0F, 20 * kDegree};
+  const bool traj_gen_suc =
+      GenerateTrajectory(free_space, traj_gen_opts, &trajectory);
+  fmt::print("Trajectory Generation End : {}.\n",
+             traj_gen_suc ? "success" : "failed");
+  // scene_sdf = cho::gen::Union::Create(wall, TrajectoryToSdf(trajectory));
+  if (!kFollowTrajectory && kShowTrajectory) {
+    scene_sdf = cho::gen::Union::Create(scene_sdf, TrajectoryToSdf(trajectory));
+  }
 
   // Raycast...
   std::vector<Eigen::Vector3f> cloud_f;
@@ -428,7 +444,13 @@ int main() {
   {
     SdfDepthImageRendererCu depth_renderer{program, resolution, fov};
 
-    open3d::visualization::Visualizer vis;
+    open3d::visualization::VisualizerWithKeyCallback vis;
+    vis.RegisterKeyCallback(
+        GLFW_KEY_UP, [](open3d::visualization::Visualizer *v) -> bool {
+          const Eigen::Isometry3f p = GetCameraPose(v);
+          SetCameraPose(v, p * Eigen::Translation3f{0.1F, 0.0, 0.0});
+          return true;
+        });
     vis.CreateVisualizerWindow();
 
     auto cloud = O3dCloudFromVecVector3f(cloud_f_cu);
@@ -437,20 +459,15 @@ int main() {
     // axes
     auto axes = open3d::geometry::TriangleMesh::CreateCoordinateFrame(
         0.5, eye.cast<double>());
-    vis.AddGeometry(axes);
+    // vis.AddGeometry(axes);
 
     Eigen::Isometry3f eye_pose_q{eye_pose};
     Eigen::AngleAxisf q{0.1, Eigen::Vector3f::UnitZ()};
 
-    // for (int k = 0; k < 128; ++k) {
     vis.GetViewControl().SetConstantZFar(100.0F);
     vis.GetViewControl().SetConstantZNear(0.001F);
     // vis.GetViewControl().SetZoom(1.0);
-
-    open3d::camera::PinholeCameraParameters p;
-    vis.GetViewControl().ConvertToPinholeCameraParameters(p);
-    p.extrinsic_.topRightCorner<3, 1>() = eye.cast<double>();
-    vis.GetViewControl().ConvertFromPinholeCameraParameters(p);
+    SetCameraPose(&vis, Eigen::Isometry3f{Eigen::Translation3f{eye}});
 
     Eigen::Quaternionf q_axes = Eigen::Quaternionf::Identity();
     float tsum = 0.0;
@@ -464,27 +481,31 @@ int main() {
         fmt::print("fps = {}\n", fps);
       }
 
-      open3d::camera::PinholeCameraParameters p;
-      vis.GetViewControl().ConvertToPinholeCameraParameters(p);
+      // hmm...
+      if (kFollowTrajectory && !trajectory.empty()) {
+        static constexpr const int kTimePerWaypointMs{200};
+        const std::int64_t t =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::high_resolution_clock::now().time_since_epoch())
+                .count();
+        const int prev_trajectory_index =
+            (t / kTimePerWaypointMs) % trajectory.size();
+        const float alpha =
+            (t % kTimePerWaypointMs) / static_cast<float>(kTimePerWaypointMs);
+        const int next_trajectory_index = prev_trajectory_index + 1;
+        if (next_trajectory_index >= trajectory.size()) {
+          SetCameraPose(&vis, trajectory.at(prev_trajectory_index));
+        } else {
+          const Eigen::Isometry3f pose =
+              Lerp(trajectory.at(prev_trajectory_index),
+                   trajectory.at(next_trajectory_index), alpha);
+          SetCameraPose(&vis, pose);
+        }
+      }
 
-      const Eigen::Isometry3f optical_from_world{p.extrinsic_.cast<float>()};
-
-      Eigen::Isometry3f optical_from_camera = Eigen::Isometry3f::Identity();
-      optical_from_camera =
-          Eigen::AngleAxisf(-90 * kDegree, Eigen::Vector3f::UnitY()) *
-          Eigen::AngleAxisf(90 * kDegree, Eigen::Vector3f::UnitX()) *
-          Eigen::Translation3f{0.0, 0.0, 0.0};
-
-      const Eigen::Isometry3f world_from_camera =
-          (optical_from_world.inverse() * optical_from_camera);
-      eye_pose_q = world_from_camera;
-
-      // 1.4x factor to account for distortion
-
-      // p.intrinsic_.
+      eye_pose_q = GetCameraPose(&vis);
       fov.array() = static_cast<float>(
           1.0 * vis.GetViewControl().GetFieldOfView() * kDegree);
-      // fov.array() = 90.0F * kDegree;
 
 #if 1
       // CreateDepthImageCuda(eye_pose_q, resolution, fov, program,
