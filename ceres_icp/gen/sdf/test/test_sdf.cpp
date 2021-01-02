@@ -24,70 +24,6 @@
 
 std::default_random_engine rng;
 
-cho::gen::SdfPtr CreateDefaultScene(const Eigen::Vector3f &eye,
-                                    const int num_objects,
-                                    cho::gen::SdfPtr *const objs_out,
-                                    cho::gen::SdfPtr *const free_space,
-                                    cho::gen::SdfPtr *const wall) {
-  using namespace cho::gen;
-
-#if 0
-  auto room = Box::Create(Eigen::Vector3f{10, 10, 10});
-  SdfPtr vol = room;
-  // room = Transformation::Create(room, Eigen::Translation3f{ 0, 0, 10 });
-  room = Onion::Create(room, 0.1f);
-  // room = Negation::Crea(room, 0.1f);
-  fmt::print("RC = {}\n", room->Center().transpose());
-#else
-  SdfPtr vol{nullptr};
-  auto space = cho::gen::GenerateSpace(rng, 5, eye, &vol);
-  if (free_space) {
-    *free_space = vol;
-  }
-  if (wall) {
-    *wall = space;
-  }
-#endif
-
-  // auto ground = Plane::Create(Eigen::Vector3f::UnitZ(), 0.0F);
-  // auto wall0 = Plane::Create(-Eigen::Vector3f::UnitX(), 5.0F);
-  // auto wall1 = Plane::Create(Eigen::Vector3f::UnitX(), 5.0F);
-  // auto wall2 = Plane::Create(-Eigen::Vector3f::UnitY(), 2.0F);
-  // auto wall3 = Plane::Create(Eigen::Vector3f::UnitY(), 2.0F);
-
-  auto pillar0 = Cylinder::Create(2.5, 0.15f);
-  pillar0 = Transformation::Create(pillar0, Eigen::Translation3f{2.0, 0, 2.5});
-
-  // return GenerateObject(6, eye);
-
-  SdfPtr scene{space};
-  // SdfPtr scene{ ground };
-  // scene = Union::Create(scene, wall0);
-  // scene = Union::Create(scene, wall1);
-  // scene = Union::Create(scene, wall2);
-  // scene = Union::Create(scene, wall3);
-  // scene = Union::Create(scene, pillar0);
-  // return scene;
-  //
-
-  // Generate Objects.
-  std::uniform_int_distribution ndist{1, 8};
-  std::vector<SdfPtr> objects;
-  SdfPtr objs;
-  for (int i = 0; i < num_objects; ++i) {
-    auto obj = cho::gen::GenerateObject(rng, ndist(rng), scene, vol, eye);
-    objects.emplace_back(obj);
-  }
-  objs = UnionTree(objects.begin(), objects.end());
-  // [Optional] output objects only
-  if (objs_out) {
-    *objs_out = objs;
-  }
-  scene = Union::Create(scene, objs);
-  // scene = objs;
-  return scene;
-}
-
 Eigen::MatrixXf CreateDepthImage(const Eigen::Isometry3f &camera_pose,
                                  const Eigen::Vector2i &resolution,
                                  const Eigen::Vector2f &fov,
@@ -164,6 +100,8 @@ struct TrajectoryGenerationOptions {
 
   float max_edge_length;
   float max_edge_angle;
+
+  int max_search_time{5000};
 };
 
 namespace detail {
@@ -172,12 +110,10 @@ bool GenerateTrajectoryImpl(const cho::gen::SdfPtr &space,
                             const Eigen::AlignedBox3f &aabb,
                             const float cur_length,
                             std::vector<Eigen::Isometry3f> *const trajectory) {
-  static constexpr const float kMaxDistance{4.0};
+  static constexpr const float kMaxDistance{0.5F};
 
-  static float cur_max{0.0};
   // Check for success.
   const bool is_long = cur_length >= opts.max_length;
-  cur_max = std::max(cur_length, cur_max);
   if (is_long || trajectory->size() >= opts.max_depth) {
     return is_long;
   }
@@ -186,21 +122,9 @@ bool GenerateTrajectoryImpl(const cho::gen::SdfPtr &space,
   const int num_remaining_edges = (opts.max_depth - trajectory->size());
   const float max_future_length =
       cur_length + opts.max_edge_length * num_remaining_edges;
-  // fmt::print("{} {}\n", opts.max_edge_length, num_remaining_edges);
-  // fmt::print("Currently @ {}/{}/{}/{}\n", cur_length, max_future_length,
-  // cur_max, opts.max_length);
   if (max_future_length < opts.max_length) {
     return false;
   }
-
-  // Determine random sampling box.
-  const Eigen::AlignedBox3f &search_box =
-      trajectory->empty()
-          ? aabb
-          : Eigen::AlignedBox3f{
-                trajectory->back().translation().array() - opts.max_edge_length,
-                trajectory->back().translation().array() +
-                    opts.max_edge_length};
 
   std::uniform_real_distribution<float> udist{0.0, 1.0};
   for (int i = 0; i < opts.max_search; ++i) {
@@ -209,11 +133,6 @@ bool GenerateTrajectoryImpl(const cho::gen::SdfPtr &space,
     Eigen::Quaternionf q;
     bool wpt_found{false};
     for (int j = 0; j < opts.max_search; ++j) {
-      // p = search_box.sample();
-      // if (space->Distance(p) > 0) {
-      //  continue;
-      //}
-
       // Generate orientation.
       if (trajectory->empty()) {
         q = Eigen::Quaternionf::UnitRandom();
@@ -225,18 +144,20 @@ bool GenerateTrajectoryImpl(const cho::gen::SdfPtr &space,
             Eigen::AngleAxisf{rpy.y(), Eigen::Vector3f::UnitY()} *
             // NOTE(yycho0108): Reduce roll component since it's so
             // disorienting...
+            // TODO(ycho): Fix hardcoded adjustment.
             Eigen::AngleAxisf{0.25F * rpy.z(), Eigen::Vector3f::UnitZ()};
       }
 
       auto delta = Eigen::AlignedBox3f{
           opts.max_edge_length * Eigen::Array3f{0, -0.25, -0.25},
           opts.max_edge_length * Eigen::Array3f{1, 0.25, 0.25}};
-      // TODO(yycho0108): Truncate `delta` to actual target edge length?
+      const Eigen::Vector3f v = delta.sample();
+      const Eigen::Vector3f &nxt_rel =
+          v.norm() >= opts.max_edge_length
+              ? v * udist(rng) * opts.max_edge_length / v.norm()
+              : v;
 
-      p = trajectory->empty() ? aabb.sample()
-                              : trajectory->back() * delta.sample();
-      // Eigen::Vector3f{udist(rng) * opts.max_edge_length, 0.0,
-      //                0.0};
+      p = trajectory->empty() ? aabb.sample() : trajectory->back() * nxt_rel;
 
       // NOTE(yycho0108): `dmin` here is a somewhat arbitrary requirement
       // that allows trajectory in the linear interpolation from the previous to
@@ -244,9 +165,10 @@ bool GenerateTrajectoryImpl(const cho::gen::SdfPtr &space,
       // TODO(yycho0108): instead of hardcoding `kMaxDistance`,
       // Precompute a heuristically determined "spacious" distance from N random
       // samples.
-      const float dmin = trajectory->empty()
-                             ? kMaxDistance
-                             : (trajectory->back().translation() - p).norm();
+      const float dmin =
+          trajectory->empty()
+              ? kMaxDistance * (opts.max_search - j) / opts.max_search
+              : (trajectory->back().translation() - p).norm();
       // Alternative formulation:
       // Prefer a somewhat spacious locale, but decay this preference
       // over search iteration. (currently linearly decayed)
@@ -288,14 +210,7 @@ bool GenerateTrajectory(const cho::gen::SdfPtr &space,
                         std::vector<Eigen::Isometry3f> *const trajectory) {
   const Eigen::AlignedBox3f aabb{space->Center().array() - space->Radius(),
                                  space->Center().array() + space->Radius()};
-  const bool res =
-      detail::GenerateTrajectoryImpl(space, opts, aabb, 0.0F, trajectory);
-  if (res) {
-    for (const auto &wpt : *trajectory) {
-      fmt::print("D={}\n", space->Distance(wpt.translation()));
-    }
-  }
-  return res;
+  return detail::GenerateTrajectoryImpl(space, opts, aabb, 0.0F, trajectory);
 }
 
 cho::gen::SdfPtr TrajectoryToSdf(
@@ -372,8 +287,8 @@ Eigen::Isometry3f Lerp(const Eigen::Isometry3f &x0, const Eigen::Isometry3f &x1,
 int main() {
   // Configure ...
   static constexpr const float kDegree{M_PI / 180.0F};
-  static constexpr const int kVerticalResolution{256};
-  static constexpr const int kHorizontalResolution{256};
+  static constexpr const int kVerticalResolution{128};
+  static constexpr const int kHorizontalResolution{128};
   static constexpr const float kVerticalFov{120 * kDegree};
   static constexpr const float kHorizontalFov{210 * kDegree};
   static constexpr const int kNumObjects{8};
@@ -390,6 +305,7 @@ int main() {
   // const std::int64_t seed = 1609529784716097929;
   // const std::int64_t seed = 1609539747653922532;
   // const std::int64_t seed = 1609540336680865385;
+  // const std::int64_t seed = 1609544564348054667;
   fmt::print("seed={}\n", seed);
   rng.seed(seed);
 
@@ -401,26 +317,28 @@ int main() {
   Eigen::Isometry3f eye_pose{Eigen::Translation3f{eye} * eye_rot};
 
   // Create scene - take in camera parameter to avoid collision.
+  const cho::gen::SceneOptions scene_opts{{1, 5, 5.0, 15.0}, {1, 5}, 1, 8};
   fmt::print("Scene Generation Start.\n");
-  cho::gen::SdfPtr objs;
-  cho::gen::SdfPtr space;
-  cho::gen::SdfPtr wall;
-  auto scene_sdf = CreateDefaultScene(eye, kNumObjects, &objs, &space, &wall);
+  cho::gen::SdfPtr objs;   // used for trajectory gen + debugging
+  cho::gen::SdfPtr space;  // used for trajectory generation
+  cho::gen::SdfPtr wall;   // unused?
+  auto scene_sdf =
+      cho::gen::GenerateScene(rng, eye, scene_opts, &objs, &space, &wall);
   fmt::print("Scene Generation End.\n");
 
   // Create trajectory.
-  // auto dummy = cho::gen::Sphere::Create(0.001);
-  cho::gen::SdfPtr free_space = cho::gen::Subtraction::Create(space, objs);
-  // cho::gen::SdfPtr free_space = space;
-  // subtraction == Intersection(A, Negation(B))
-  // == max(A, Negation(B))
   fmt::print("Trajectory Generation Start.\n");
+  cho::gen::SdfPtr free_space = cho::gen::Subtraction::Create(space, objs);
   std::vector<Eigen::Isometry3f> trajectory;
   TrajectoryGenerationOptions traj_gen_opts{128, 16, 16.0F, 2.0F, 20 * kDegree};
   const bool traj_gen_suc =
       GenerateTrajectory(free_space, traj_gen_opts, &trajectory);
   fmt::print("Trajectory Generation End : {}.\n",
              traj_gen_suc ? "success" : "failed");
+  if (!traj_gen_suc) {
+    fmt::print("ABORT!");
+    return 1;
+  }
 
   // NOTE(yycho0108): kShowTrajectory is disabled if following trajectory,
   // since the primitives generated for showing the trajectory would
@@ -463,12 +381,51 @@ int main() {
     SdfDepthImageRendererCu depth_renderer{program, resolution, fov};
 
     open3d::visualization::VisualizerWithKeyCallback vis;
+
+    // Key callbacks ...
     vis.RegisterKeyCallback(
         GLFW_KEY_UP, [](open3d::visualization::Visualizer *v) -> bool {
           const Eigen::Isometry3f p = GetCameraPose(v);
           SetCameraPose(v, p * Eigen::Translation3f{0.1F, 0.0, 0.0});
-          return true;
+          return false;
         });
+    vis.RegisterKeyCallback(
+        GLFW_KEY_DOWN, [](open3d::visualization::Visualizer *v) -> bool {
+          const Eigen::Isometry3f p = GetCameraPose(v);
+          SetCameraPose(v, p * Eigen::Translation3f{-0.1F, 0.0, 0.0});
+          return false;
+        });
+    vis.RegisterKeyCallback(
+        GLFW_KEY_LEFT, [](open3d::visualization::Visualizer *v) -> bool {
+          const Eigen::Isometry3f p = GetCameraPose(v);
+          SetCameraPose(v, p * Eigen::Translation3f{0.0F, 0.1F, 0.0});
+          return false;
+        });
+    vis.RegisterKeyCallback(
+        GLFW_KEY_RIGHT, [](open3d::visualization::Visualizer *v) -> bool {
+          const Eigen::Isometry3f p = GetCameraPose(v);
+          SetCameraPose(v, p * Eigen::Translation3f{0.0F, -0.1F, 0.0});
+          return false;
+        });
+    vis.RegisterKeyActionCallback(
+        GLFW_KEY_SPACE,
+        [](open3d::visualization::Visualizer *v, const int action,
+           const int mods) -> bool {
+          if (action != GLFW_RELEASE) {
+            return false;
+          }
+          if (mods & GLFW_MOD_SHIFT) {
+            const Eigen::Isometry3f p = GetCameraPose(v);
+            SetCameraPose(v, p * Eigen::Translation3f{0.0F, 0.0F, -0.1F});
+            return false;
+          } else {
+            const Eigen::Isometry3f p = GetCameraPose(v);
+            SetCameraPose(v, p * Eigen::Translation3f{0.0F, 0.0F, 0.1F});
+            return false;
+          }
+          return false;
+        });
+
     vis.CreateVisualizerWindow();
 
     auto cloud = O3dCloudFromVecVector3f(cloud_f_cu);
@@ -496,7 +453,7 @@ int main() {
       if (tcount > 0) {
         const float tmean = tsum / tcount / 1e6;
         const float fps = 1.0 / tmean;
-        fmt::print("fps = {}\n", fps);
+        fmt::print("\rfps = {}", fps);
       }
 
       // Follow a linearly interpolated trajectory.

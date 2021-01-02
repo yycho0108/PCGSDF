@@ -11,33 +11,41 @@
 namespace cho {
 namespace gen {
 cho::gen::SdfPtr GenerateSpace(std::default_random_engine &rng,
-                               const int num_boxes, const Eigen::Vector3f &eye,
+                               const SpaceOptions &opts,
+                               const Eigen::Vector3f &eye,
                                cho::gen::SdfPtr *const vol) {
   using namespace cho::gen;
 
+  // Generate number of boxes.
+  std::uniform_int_distribution ndist{opts.min_num_boxes, opts.max_num_boxes};
+  const int num_boxes = ndist(rng);
+
   // TODO(ycho): Expose these parameters.
-  std::uniform_real_distribution<float> sdist{5.0, 15.0};
-  std::uniform_real_distribution<float> udist{-10.0, 10.0};
+  std::uniform_real_distribution<float> dist{opts.min_box_size,
+                                             opts.max_box_size};
 
   std::vector<SdfPtr> rooms;
   rooms.reserve(num_boxes);
   SdfPtr out;
   while (rooms.size() < num_boxes) {
+    // Generate a "room" (a box, really)
     std::array<float, traits<Box>::DoF> a;
-    std::generate(a.begin(), a.end(), [&udist, &rng]() { return udist(rng); });
+    std::generate(a.begin(), a.end(), [&dist, &rng]() { return dist(rng); });
     auto room = Box::CreateFromArray(a);
-    // fmt::print("Room radius = {}\n", room->Radius());
 
-    // Adjust size.
-    const float target_radius = sdist(rng);
-    room = Scale::Create(room, target_radius / room->Radius());
+    // Conditionally adjust size.
+    if (room->Radius() < dist.min() || room->Radius() > dist.max()) {
+      const float target_radius = dist(rng);
+      room = Scale::Create(room, target_radius / room->Radius());
+    }
 
-    // Transform ...
-    const Eigen::Vector3f pos{udist(rng), udist(rng), udist(rng)};
+    // Apply a random transform.
+    const Eigen::Vector3f pos{dist(rng), dist(rng), dist(rng)};
     room = Transformation::Create(room, Eigen::Translation3f{pos});
 
     if (rooms.empty()) {
       // Initial room must contain camera.
+      // TODO(ycho): Relax this arbitrary constraint.
       if (room->Distance(eye) > 0) {
         continue;
       }
@@ -50,36 +58,34 @@ cho::gen::SdfPtr GenerateSpace(std::default_random_engine &rng,
     }
   }
 
-  // Rebuild out from balanced tree of unions.
+  // Rebuild `out` from balanced tree of unions.
   out = UnionTree(rooms.begin(), rooms.end());
 
-  // out = Sphere::Create(30.0F);
-  // out = Plane::Create(Eigen::Vector3f::UnitZ(), 1.0F);
-  // out = Box::Create(Eigen::Vector3f{5.0, 5.0, 5.0});
-
-  // vol == occupied internal volume
+  // Optionally export internal volume.
   if (vol) {
     *vol = out;
   }
 
   // Convert to a "wall" to create a valid geometry.
   // This gives thickness on our model of the negative space.
-  out = Onion::Create(out, 0.1f);
-
+  out = Onion::Create(out, 0.001f);
   return out;
 }
 
 cho::gen::SdfPtr GenerateObject(std::default_random_engine &rng,
-                                const int num_primitives,
+                                const ObjectOptions &opts,
                                 const cho::gen::SdfPtr &scene,
                                 const cho::gen::SdfPtr &scene_vol,
                                 const Eigen::Vector3f &eye) {
   using namespace cho::gen;
 
-  SdfPtr out{nullptr};
+  // Generate number of primitives.
+  std::uniform_int_distribution ndist{opts.min_num_primitives,
+                                      opts.max_num_primitives};
+  const int num_primitives = ndist(rng);
 
+  SdfPtr out{nullptr};
   const float sr = scene->Radius();
-  // const float sr = 10.0F;
   const Eigen::AlignedBox3f scene_box{
       scene->Center() - sr * Eigen::Vector3f::Ones(),
       scene->Center() + sr * Eigen::Vector3f::Ones()};
@@ -165,7 +171,7 @@ cho::gen::SdfPtr GenerateObject(std::default_random_engine &rng,
       continue;
     }
 
-    // debug-only construct .
+    // debug-only construct: connect node hierarchy.
     // if (!dbg) {
     //  auto d = out->Center() - sdf->Center();
     //  auto cyl = Cylinder::Create(0.5 * d.norm(), 0.1f);
@@ -198,5 +204,48 @@ cho::gen::SdfPtr GenerateObject(std::default_random_engine &rng,
   //}
   return out;
 }
+
+cho::gen::SdfPtr GenerateScene(std::default_random_engine &rng,
+                               const Eigen::Vector3f &eye,
+                               const SceneOptions &opts,
+                               cho::gen::SdfPtr *const objs_out,
+                               cho::gen::SdfPtr *const free_space,
+                               cho::gen::SdfPtr *const wall) {
+  using namespace cho::gen;
+
+  // Generate Space.
+  SdfPtr vol{nullptr};
+  auto space = cho::gen::GenerateSpace(rng, opts.space_opts, eye, &vol);
+
+  // FIXME(ycho): Remove these hacks.
+  // Export some partial sdfs...
+  if (free_space) {
+    *free_space = vol;
+  }
+  if (wall) {
+    *wall = space;
+  }
+
+  // Generate Objects.
+  std::uniform_int_distribution ndist{opts.max_num_objects,
+                                      opts.max_num_objects};
+  const int num_objects = ndist(rng);
+  std::vector<SdfPtr> objects;
+  SdfPtr objs;
+  for (int i = 0; i < num_objects; ++i) {
+    auto obj = cho::gen::GenerateObject(rng, opts.object_opts, space, vol, eye);
+    objects.emplace_back(obj);
+  }
+  objs = UnionTree(objects.begin(), objects.end());
+
+  // Optionally output objects separately.
+  if (objs_out) {
+    *objs_out = objs;
+  }
+
+  SdfPtr scene = Union::Create(space, objs);
+  return scene;
+}
+
 }  // namespace gen
 }  // namespace cho

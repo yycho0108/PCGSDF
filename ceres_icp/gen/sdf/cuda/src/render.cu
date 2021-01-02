@@ -10,6 +10,7 @@
 #define BLOCK_SIZE 32
 #define STACK_SIZE 32
 #define USE_SHMEM 1
+#define OVERSTEP 0
 
 #define PROFILE_SECTIONS 0
 
@@ -192,6 +193,13 @@ __global__ void RayMarchingDepthWithProgramKernel(
   // Perform RayMarching.
   bool hit = false;
   float depth = 0.0F;
+
+#if OVERSTEP
+  float omega = 1.2F;
+  float prv_offset = 0.0F;
+  float step_length = 0.0F;
+#endif
+
   for (int i = 0; i < max_iter; ++i) {
     const float3 point = eye + depth * ray;
 #if USE_SHMEM
@@ -199,8 +207,22 @@ __global__ void RayMarchingDepthWithProgramKernel(
 #else
     const float offset = EvaluateSdf(ops, params, num_ops, stack, point);
 #endif
+
+#if OVERSTEP
+    const float abs_offset = abs(offset);
+    const bool sor_fail = omega > 1 && (abs_offset + prv_offset) < step_length;
+    if (sor_fail) {
+      step_length -= omega * step_length;
+      omega = 1;
+    } else {
+      step_length = offset * omega;
+    }
+    prv_offset = abs_offset;
+    depth += step_length;
+#else
     depth += offset;
-    if (offset < eps) {
+#endif
+    if (std::abs(offset) < eps) {
       hit = true;
       break;
     }
@@ -288,11 +310,10 @@ SdfDepthImageRendererCu::Impl::Impl(const std::vector<cho::gen::SdfData>& scene,
   thrust::host_vector<float> param_h;
   program_h.resize(scene.size());
   for (const auto& op : scene) {
-    // Set program op.
+    // Set program op and store offset to self params.
     program_h[op_index] = SdfDataCompact{op.code, param_index};
 
     // Copy parameters to contiguous buffer.
-    printf("%d==%d\n", param_index, param_h.size());
     param_h.insert(param_h.end(), op.param.begin(), op.param.end());
 
     // Increment indices for populating the next op.
@@ -338,7 +359,7 @@ void SdfDepthImageRendererCu::Impl::Render(
   RayMarchingDepthWithProgramKernel<<<blocks, threads, shmem_size>>>(
       eye, eye_q, res, fov, thrust::raw_pointer_cast(program.data()),
       program.size(), thrust::raw_pointer_cast(params.data()), params.size(),
-      36, 100.0, 1e-2, thrust::raw_pointer_cast(depth_image_buf.data()),
+      32, 100.0, 1e-2, thrust::raw_pointer_cast(depth_image_buf.data()),
       reinterpret_cast<float3*>(
           thrust::raw_pointer_cast(point_cloud_buf.data())));
 

@@ -415,7 +415,7 @@ class Subtraction : public SdfBase<Subtraction> {
  public:
   explicit Subtraction(const SdfPtr& a, const SdfPtr& b) : a_{a}, b_{b} {}
   float Distance_(const Eigen::Vector3f& point) const {
-      // a - b == Intersection(a, Negation(b))
+    // a - b == Intersection(a, Negation(b))
     return std::max(a_->Distance(point), -b_->Distance(point));
   }
 
