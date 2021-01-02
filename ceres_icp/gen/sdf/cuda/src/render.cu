@@ -176,7 +176,7 @@ __global__ void RayMarchingDepthWithProgramKernel(
   float stack[STACK_SIZE];
 
   // Compute ray based on x,y, fov and resolution.
-#if 1
+#if 0
   // Spherical?
   const float2 fov_step = fov / make_float2(res);
   const float2 angles = fov / -2.0F + make_float2(x, y) * fov_step;

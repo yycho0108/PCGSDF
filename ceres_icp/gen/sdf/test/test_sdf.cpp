@@ -94,14 +94,14 @@ auto O3dCloudFromVecVector3f(const std::vector<Eigen::Vector3f> &cloud_in) {
 }
 
 struct TrajectoryGenerationOptions {
-  int max_search;
+  int max_search_steps;
   int max_depth;
   float max_length;
 
   float max_edge_length;
   float max_edge_angle;
 
-  int max_search_time{5000};
+  float max_search_time{5000.0F};
 };
 
 namespace detail {
@@ -110,6 +110,7 @@ bool GenerateTrajectoryImpl(const cho::gen::SdfPtr &space,
                             const Eigen::AlignedBox3f &aabb,
                             const float cur_length,
                             std::vector<Eigen::Isometry3f> *const trajectory) {
+  auto t_start = std::chrono::high_resolution_clock::now();
   static constexpr const float kMaxDistance{0.5F};
 
   // Check for success.
@@ -126,13 +127,28 @@ bool GenerateTrajectoryImpl(const cho::gen::SdfPtr &space,
     return false;
   }
 
+  // Create options for the child....
+  TrajectoryGenerationOptions child_opts = opts;
+
   std::uniform_real_distribution<float> udist{0.0, 1.0};
-  for (int i = 0; i < opts.max_search; ++i) {
+  for (int i = 0; i < opts.max_search_steps; ++i) {
+    // Apply timeout and abort.
+    auto t_now = std::chrono::high_resolution_clock::now();
+    const int elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t_now - t_start)
+            .count();
+    const float time_left = opts.max_search_time - elapsed;
+    if (time_left < 0) {
+      return false;
+    }
+    const int child_left = (opts.max_search_steps - i);
+    child_opts.max_search_time = time_left / child_left;
+
     // Generate Waypoint.
     Eigen::Vector3f p;
     Eigen::Quaternionf q;
     bool wpt_found{false};
-    for (int j = 0; j < opts.max_search; ++j) {
+    for (int j = 0; j < opts.max_search_steps; ++j) {
       // Generate orientation.
       if (trajectory->empty()) {
         q = Eigen::Quaternionf::UnitRandom();
@@ -165,10 +181,10 @@ bool GenerateTrajectoryImpl(const cho::gen::SdfPtr &space,
       // TODO(yycho0108): instead of hardcoding `kMaxDistance`,
       // Precompute a heuristically determined "spacious" distance from N random
       // samples.
-      const float dmin =
-          trajectory->empty()
-              ? kMaxDistance * (opts.max_search - j) / opts.max_search
-              : (trajectory->back().translation() - p).norm();
+      const float dmin = trajectory->empty()
+                             ? kMaxDistance * (opts.max_search_steps - j) /
+                                   opts.max_search_steps
+                             : (trajectory->back().translation() - p).norm();
       // Alternative formulation:
       // Prefer a somewhat spacious locale, but decay this preference
       // over search iteration. (currently linearly decayed)
@@ -195,8 +211,8 @@ bool GenerateTrajectoryImpl(const cho::gen::SdfPtr &space,
     trajectory->emplace_back(Eigen::Translation3f{p} * q);
 
     // Return if success.
-    if (GenerateTrajectoryImpl(space, opts, aabb, cur_length + edge_length,
-                               trajectory)) {
+    if (GenerateTrajectoryImpl(space, child_opts, aabb,
+                               cur_length + edge_length, trajectory)) {
       return true;
     }
     trajectory->pop_back();
@@ -284,6 +300,34 @@ Eigen::Isometry3f Lerp(const Eigen::Isometry3f &x0, const Eigen::Isometry3f &x1,
   return Eigen::Isometry3f{Eigen::Translation3f{d} * q};
 }
 
+// cho::gen::SdfPtr TestTangency() {
+//   auto a = cho::gen::Sphere::Create(3.0);
+//   a = cho::gen::Transformation::Create(a, Eigen::Vector3f{1.5, 3.1, 0});
+
+//   auto b = cho::gen::Box::Create(Eigen::Vector3f{2.0, 1.0, 4.6});
+//   b = cho::gen::Transformation::Create(b, Eigen::Vector3f{-4.5, -2.2, 0});
+
+//   // Define Sampling domain
+//   Eigen::AlignedBox3f box;
+//   box.extend(Eigen::Vector3f{a->Center().array() - a->Radius()});
+//   box.extend(Eigen::Vector3f{a->Center().array() + a->Radius()});
+//   box.extend(Eigen::Vector3f{b->Center().array() - b->Radius()});
+//   box.extend(Eigen::Vector3f{b->Center().array() + b->Radius()});
+
+//   const int resolution{16};
+
+//   Eigen::Array3f step{box.diagonal().array() / resolution};
+//   for (int i = 0; i < resolution; ++i) {
+//     for (int j = 0; j < resolution; ++j) {
+//       for (int k = 0; k < resolution; ++k) {
+//         const Eigen::Vector3f p{box.min().array() +
+//                                 (step * Eigen::Array3f{i, j, k})};
+//         a->Distance(p) + b->Distance(p);
+//       }
+//     }
+//   }
+// }
+
 int main() {
   // Configure ...
   static constexpr const float kDegree{M_PI / 180.0F};
@@ -317,7 +361,7 @@ int main() {
   Eigen::Isometry3f eye_pose{Eigen::Translation3f{eye} * eye_rot};
 
   // Create scene - take in camera parameter to avoid collision.
-  const cho::gen::SceneOptions scene_opts{{1, 5, 5.0, 15.0}, {1, 5}, 1, 8};
+  const cho::gen::SceneOptions scene_opts{{1, 5, 5.0, 15.0}, {1, 5}, 5, 16};
   fmt::print("Scene Generation Start.\n");
   cho::gen::SdfPtr objs;   // used for trajectory gen + debugging
   cho::gen::SdfPtr space;  // used for trajectory generation
@@ -330,13 +374,18 @@ int main() {
   fmt::print("Trajectory Generation Start.\n");
   cho::gen::SdfPtr free_space = cho::gen::Subtraction::Create(space, objs);
   std::vector<Eigen::Isometry3f> trajectory;
-  TrajectoryGenerationOptions traj_gen_opts{128, 16, 16.0F, 2.0F, 20 * kDegree};
+  TrajectoryGenerationOptions traj_gen_opts{128, 32, 32.0F, 2.0F, 20 * kDegree};
+  auto tt0 = std::chrono::high_resolution_clock::now();
   const bool traj_gen_suc =
       GenerateTrajectory(free_space, traj_gen_opts, &trajectory);
+  auto tt1 = std::chrono::high_resolution_clock::now();
+  fmt::print(
+      "Gen took {} ms\n",
+      std::chrono::duration_cast<std::chrono::milliseconds>(tt1 - tt0).count());
   fmt::print("Trajectory Generation End : {}.\n",
              traj_gen_suc ? "success" : "failed");
   if (!traj_gen_suc) {
-    fmt::print("ABORT!");
+    fmt::print("ABORT!\n");
     return 1;
   }
 
@@ -384,8 +433,14 @@ int main() {
 
     // Key callbacks ...
     vis.RegisterKeyCallback(
-        GLFW_KEY_UP, [](open3d::visualization::Visualizer *v) -> bool {
+        GLFW_KEY_UP,
+        [&free_space](open3d::visualization::Visualizer *v) -> bool {
           const Eigen::Isometry3f p = GetCameraPose(v);
+          // Disallow movement into colliding region.
+          if (free_space->Distance(p.translation() +
+                                   Eigen::Vector3f{0.1F, 0.0, 0.0}) > 0) {
+            return false;
+          }
           SetCameraPose(v, p * Eigen::Translation3f{0.1F, 0.0, 0.0});
           return false;
         });
@@ -443,6 +498,16 @@ int main() {
     vis.GetViewControl().SetConstantZNear(0.001F);
     // vis.GetViewControl().SetZoom(1.0);
     SetCameraPose(&vis, Eigen::Isometry3f{Eigen::Translation3f{eye}});
+
+    {
+      open3d::camera::PinholeCameraParameters p;
+      vis.GetViewControl().ConvertToPinholeCameraParameters(p);
+
+      // Why the hell is this interface so stupid?
+      vis.GetViewControl().ChangeFieldOfView(
+          (80.0F - vis.GetViewControl().GetFieldOfView()) /
+          vis.GetViewControl().FIELD_OF_VIEW_STEP);
+    }
 
     Eigen::Quaternionf q_axes = Eigen::Quaternionf::Identity();
     float tsum = 0.0;
