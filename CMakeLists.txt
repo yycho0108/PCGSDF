@@ -9,7 +9,7 @@ if(CCACHE)
     set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CCACHE_PROGRAM}")
 endif(CCACHE)
 
-project(CeresIcp)
+project(PCGSDF)
 
 # Configure ...
 set(CMAKE_CXX_STANDARD 17)
@@ -53,5 +53,5 @@ function(dump_cmake_variables)
     endforeach()
 endfunction()
 
-add_subdirectory(ceres_icp)
+add_subdirectory(pcgsdf)
 # dump_cmake_variables()
