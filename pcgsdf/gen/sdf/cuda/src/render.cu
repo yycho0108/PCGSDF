@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
+
 #include <chrono>
 #include <iostream>
 
@@ -14,56 +15,52 @@
 
 #define PROFILE_SECTIONS 0
 
-__device__ __inline__ void Push(float* const s, int& i, const float value) {
+__device__ inline void Push(float* const s, int& i, const float value) {
   s[++i] = value;
 }
 
-__device__ __inline__ float Pop(float* const s, int& i) { return s[i--]; }
+__device__ inline float Pop(float* const s, int& i) { return s[i--]; }
 
-__device__ __inline__ float SdPoint(const float2 p, const float2 target) {
+__device__ inline float SdPoint(const float2 p, const float2 target) {
   return length(target - p);
 }
 
-__device__ __inline__ float SdLine(const float2 p, const float2 a,
-                                   const float2 b) {
+__device__ inline float SdLine(const float2 p, const float2 a, const float2 b) {
   const float2 pa = p - a;
   const float2 u = normalize(b - a);
   return cross(u, pa);
 }
 
-__device__ __inline__ float SdCone(const float3 p, const float2 q) {
-  const float2 w{length(make_float2(p)), p.z};
+__device__ inline float SdCone(const float3 p, const float2 q) {
+  const float2 w{length(p.x, p.y), p.z};
   const float2 d{w - q};
-  const float k = q.y / q.x;
-  const float k2 = q.x * q.y / (q.x + length(q));
-  const float2 pr{q.x, 0};
-  const float2 ph{0, q.y};
-  return k * d.y >= w.x ? SdPoint(w, ph)
-                        : ((w.y >= -k2 * d.x && k * w.y >= d.x)
-                               ? SdLine(w, ph, pr)
-                               : (w.x >= q.x ? SdPoint(w, pr) : -w.y));
+  const float lql = length(q);
+  return d.y * q.y >= q.x * w.x ? length(w.x, d.y)
+                                : (q.x <= w.x && q.y * w.y <= d.x * q.x)
+                                      ? length(d.x, w.y)
+                                      : w.y * (q.x + lql) < -d.x * q.y
+                                            ? -w.y
+                                            : (d.y * q.x + q.y * w.x) / lql;
 }
 
 __device__ float EvaluateSdf(const SdfDataCompact* const ops,
                              const float* const params, const int n,
                              float* const s, const float3& point) {
-  // Avoid typing too much...
+  // Save on typing...
   using Op = cho::gen::SdfOpCode;
 
   float3 p = point;
   int index{-1};
-  // int max_index{0};
   for (int i = 0; i < n; ++i) {
-    // will break otherwise.
+    // NOTE(ycho): assert against stack overflow.
     assert(index < STACK_SIZE);
-    // max_index=max(index,max_index);
 
     const SdfDataCompact& op = ops[i];
     const float* const param = params + op.param_offset;
     switch (op.code) {
       case Op::SPHERE: {
         const float radius = param[0];
-        Push(s, index, sqrt(dot(p, p)) - radius);
+        Push(s, index, length(p) - radius);
         break;
       }
       case Op::BOX: {
@@ -77,8 +74,7 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops,
       case Op::CYLINDER: {
         const float radius = param[0];
         const float height = param[1];
-        const float2 d{sqrt(p.x * p.x + p.y * p.y) - radius,
-                       std::abs(p.z) - height};
+        const float2 d{sqrt(p.x * p.x + p.y * p.y) - radius, abs(p.z) - height};
         Push(s, index, min(max(d), 0.0F) + length(max(d, 0.0F)));
         break;
       }
@@ -95,7 +91,7 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops,
         break;
       }
       case Op::CONE: {
-        Push(s, index, SdCone(p, abs(make_float2(param[0], param[1]))));
+        Push(s, index, SdCone(p, make_float2(param[0], param[1])));
         break;
       }
       case Op::ROUND: {
@@ -134,7 +130,7 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops,
       case Op::ONION: {
         const float d0 = Pop(s, index);
         const float thickness = param[0];
-        Push(s, index, std::abs(d0) - thickness);
+        Push(s, index, abs(d0) - thickness);
         break;
       }
       case Op::TRANSLATION: {
@@ -170,13 +166,12 @@ __device__ float EvaluateSdf(const SdfDataCompact* const ops,
     }
   }
   // printf("MAX STACK @ %d\n", max_index);
-
   // Eqivalent to return Pop(s,index);
   return s[0];
 }
 
-__inline__ __device__ float3 ComputeRay(const int2 res, const float2 fov,
-                                        const float2 index, const float4 q) {
+inline __device__ float3 ComputeRay(const int2 res, const float2 fov,
+                                    const float2 index, const float4 q) {
   const float2 angles = fov * (index / res - 0.5F);
   const float c = cos(angles.x);
   const float3 ray_rel =
@@ -204,7 +199,7 @@ __global__ void RayMarchingDepthWithProgramKernel(
   const int index = x * res.y + y;
 
 #if USE_SHMEM
-  extern __shared__ std::uint8_t shmem[];
+  extern __shared__ uint8_t shmem[];
   SdfDataCompact* const ops_s = reinterpret_cast<SdfDataCompact*>(shmem);
   float* const params_s = reinterpret_cast<float*>(&ops_s[num_ops]);
   const int tid = blockDim.x * threadIdx.x + threadIdx.y;
@@ -227,7 +222,10 @@ __global__ void RayMarchingDepthWithProgramKernel(
   const float3 ray = ComputeRay(res, fov, make_float2(x, y), eye_q);
 
   // Perform RayMarching.
+
+#if 1
   bool hit = false;
+#endif
   float depth = 0.0F;
 
 #if OVERSTEP
@@ -258,7 +256,7 @@ __global__ void RayMarchingDepthWithProgramKernel(
 #else
     depth += offset;
 #endif
-    if (std::abs(offset) < eps) {
+    if (abs(offset) < eps) {
       hit = true;
       break;
     }
@@ -279,83 +277,173 @@ __global__ void RayMarchingDepthWithProgramKernel(
   depth_image[index] = depth;
   point_cloud[index] = eye + depth * ray;
 }
-// __global__ void RayMarchingDepthWithProgramRayGroupingChildKernel(
 
-// ) {}
-// __global__ void RayMarchingDepthWithProgramRayGroupingKernel(
-//     const float3 eye, const float4 eye_q, const int2 res, const float2 fov,
-//     const int2 roi, const SdfDataCompact* const ops, const int num_ops,
-//     const float* const params, const int num_params, const int max_iter,
-//     const float max_depth, const float eps, float* const depth_image,
-//     float3* const point_cloud) {
-//   // Determine self-index and return if OOB.
-//   const int x = roi.x * (blockIdx.x * blockDim.x + threadIdx.x);
-//   const int y = roi.y * (blockIdx.y * blockDim.y + threadIdx.y);
-//   if (x >= res.x || y >= res.y) {
-//     return;
-//   }
-//   const int index = x * res.y + y;
+__device__ float RayMarchSimple(const int max_iter, const float max_depth,
+                                const float init_depth,
+                                const SdfDataCompact* const ops,
+                                const int num_ops, const float* const params,
+                                const float3 eye, const float3 ray,
+                                const float ray_div, const float eps,
+                                float* const stack, int* const hit_iter) {
+  float depth = init_depth;
+  bool hit = false;
 
-//   // Copy input to shared memory.
-//   extern __shared__ std::uint8_t shmem[];
-//   SdfDataCompact* const ops_s = reinterpret_cast<SdfDataCompact*>(shmem);
-//   float* const params_s = reinterpret_cast<float*>(&ops_s[num_ops]);
-//   const int tid = blockDim.x * threadIdx.x + threadIdx.y;
-//   const int num_threads = blockDim.x * blockDim.y;
-//   for (int j = tid; j < num_ops; j += num_threads) {
-//     ops_s[j] = ops[j];
-//   }
-//   for (int j = tid; j < num_params; j += num_threads) {
-//     params_s[j] = params[j];
-//   }
-//   __syncthreads();
+  float prev_offset{0.0F};
+  for (int i = 0; i < max_iter; ++i) {
+    const float3 point = eye + depth * ray;
+    const float offset = EvaluateSdf(ops, params, num_ops, stack, point);
 
-//   // Each thread will have its own `stack`.
-//   // Hopefully it would not overflow...
-//   float stack[STACK_SIZE];
+    // Terminate on hit
+    if (offset < eps + depth * ray_div) {
+      // Optionally restore prior valid point.
+      // NOTE(ycho): This is typically triggered on non-zero ray divergence.
+      if (ray_div > 0) {
+        depth -= prev_offset;
+      }
 
-//   // Compute ray based on x,y, fov and resolution.
-//   const float2 center = make_float2(x, y) + 0.5 * roi;
-//   const float3 ray = ComputeRay(res, fov, center, eye_q);
-//   const float theta = max(fov * (roi - 1) / 2);
-//   const float ray_div = sqrt(2 - 2 * cos(theta));
+      hit = true;
+      *hit_iter = i;
+      break;
+    }
 
-//   // Perform RayMarching.
-//   bool split = false;
-//   int split_iter{0};
-//   float depth = 0.0F;
-//   for (int i = 0; i < max_iter; ++i) {
-//     const float3 point = eye + depth * ray;
-//     const float offset = EvaluateSdf(ops_s, params_s, num_ops, stack, point);
-//     if (offset - depth * ray_div < 0) {
-//       split = true;
-//       split_iter = i;
-//       break;
-//     }
-//     depth < offset* ray_div depth += offset;
-//     if (std::abs(offset) < eps) {
-//       hit = true;
-//       break;
-//     }
-//     if (depth >= max_depth) {
-//       depth = max_depth;
-//       break;
-//     }
-//   }
+    depth += offset;
+    prev_offset = offset;
 
-//   // If required, split ray into four pieces ...
-//   if (split) {
-//     const dim3 threads(roi.x, roi.y);
-//     const dim3 blocks(1, 1);
-//     RayMarchingDepthWithProgramRayGroupingChildKernel<<<blocks, threads>>>(
-//         depth);
-//   } else {
-//     // o.w. directly commit result
-//     // Output!
-//     depth_image[index] = depth;
-//     point_cloud[index] = eye + depth * ray;
-//   }
-// }
+    // Terminate past max depth
+    if (depth >= max_depth) {
+      depth = max_depth;
+      break;
+    }
+  }
+  if (!hit) {
+    *hit_iter = max_iter;
+  }
+  return depth;
+}
+
+__global__ void RayMarchingDepthWithProgramRayGroupingChildKernel(
+    const float3 eye, const float4 eye_q, const int2 res, const float2 fov,
+    const int2 offset, const SdfDataCompact* const ops, const int num_ops,
+    const float* const params, const int max_iter, const float max_depth,
+    const float eps, float* const depth_image, float3* const point_cloud) {
+  float stack[STACK_SIZE];
+  const int x = offset.x + (blockIdx.x * blockDim.x + threadIdx.x);
+  const int y = offset.y + (blockIdx.y * blockDim.y + threadIdx.y);
+  if (x >= res.x || y >= res.y) {
+    return;
+  }
+  const float3 ray = ComputeRay(res, fov, make_float2(x, y), eye_q);
+  int iter{0};
+  const float depth =
+      RayMarchSimple(max_iter, max_depth, depth_image[x * res.y + y], ops,
+                     num_ops, params, eye, ray, 0.0F, eps, stack, &iter);
+  depth_image[x * res.y + y] = depth;
+  point_cloud[x * res.y + y] = eye + depth * ray;
+}
+
+__global__ void RayMarchingDepthWithProgramRayGroupingKernel(
+    const float3 eye, const float4 eye_q, const int2 res, const float2 fov,
+    const int2 roi, const SdfDataCompact* const ops, const int num_ops,
+    const float* const params, const int num_params, const int max_iter,
+    const float max_depth, const float eps, float* const depth_image,
+    float3* const point_cloud) {
+  // Determine self-index and return if OOB ...
+  const int x = roi.x * (blockIdx.x * blockDim.x + threadIdx.x);
+  const int y = roi.y * (blockIdx.y * blockDim.y + threadIdx.y);
+  if (x >= res.x || y >= res.y) {
+    return;
+  }
+
+#if 1
+  // Copy input to shared memory.
+  extern __shared__ uint8_t shmem[];
+  SdfDataCompact* const ops_s = reinterpret_cast<SdfDataCompact*>(shmem);
+  float* const params_s = reinterpret_cast<float*>(&ops_s[num_ops]);
+  const int tid = blockDim.x * threadIdx.x + threadIdx.y;
+  const int num_threads = blockDim.x * blockDim.y;
+  for (int j = tid; j < num_ops; j += num_threads) {
+    ops_s[j] = ops[j];
+  }
+  for (int j = tid; j < num_params; j += num_threads) {
+    params_s[j] = params[j];
+  }
+  __syncthreads();
+#endif
+
+  // Each thread will have its own `stack`.
+  // Hopefully it would not overflow...
+  float stack[STACK_SIZE];
+
+  // Compute ray based on x,y, fov and resolution.
+  const float2 center = make_float2(x, y) + (0.5F * make_float2(roi - 1));
+  const float3 ray = ComputeRay(res, fov, center, eye_q);
+  const float2 delta_angle = fov * make_float2(roi - 1) / make_float2(2 * res);
+
+  // Scaling factor for ray divergence (radius) as a function of distance
+  const float ray_div =
+      sqrt(4 - (1 + cos(delta_angle.x)) * (1 + cos(delta_angle.y)));
+
+  // Raymarch along center ray...
+  int split_iter{0};
+  const float split_depth =
+      RayMarchSimple(max_iter, max_depth, 0.0F, ops_s, num_ops, params_s, eye,
+                     ray, ray_div, eps, stack, &split_iter);
+
+  // If required, split ray into pieces.
+  if (split_depth < max_depth && split_iter < max_iter) {
+#if 1
+    // Serial
+    for (int i = x; i < min(res.x, x + roi.x); ++i) {
+      for (int j = y; j < min(res.y, y + roi.y); ++j) {
+        const float3 ray = ComputeRay(res, fov, make_float2(i, j), eye_q);
+        int iter{0};
+        const float depth =
+            RayMarchSimple(max_iter - split_iter, max_depth, split_depth, ops,
+                           num_ops, params, eye, ray, 0.0F, eps, stack, &iter);
+        // const float depth1 =
+        //   RayMarchSimple(max_iter, max_depth, 0, ops,
+        //                  num_ops, params, eye, ray, 0.0F, eps, stack,
+        //                  &iter1);
+        // if(depth1 > depth0 + eps){
+        //    printf("%f < %f vs truth = %f | %d %d\n", split_depth, depth0,
+        //    depth1, iter0, iter1);
+        //}
+        depth_image[i * res.y + j] = depth;
+        point_cloud[i * res.y + j] = eye + depth * ray;
+      }
+    }
+#else
+    // Populate initial values
+    for (int i = x; i < min(res.x, x + roi.x); ++i) {
+      for (int j = y; j < min(res.y, y + roi.y); ++j) {
+        depth_image[i * res.y + j] = split_depth;
+        point_cloud[i * res.y + j] = eye + split_depth * ray;
+      }
+    }
+
+    // Parallel
+    const dim3 threads(roi.x, roi.y);
+    const dim3 blocks(1, 1);
+    cudaStream_t s;
+    cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
+    RayMarchingDepthWithProgramRayGroupingChildKernel<<<blocks, threads, 0,
+                                                        s>>>(
+        eye, eye_q, res, fov, make_int2(x, y), ops, num_ops, params,
+        max_iter - split_iter, max_depth, eps, depth_image, point_cloud);
+    cudaStreamDestroy(s);
+#endif
+  } else {
+    // o.w. directly commit result
+    // Output!
+    for (int i = x; i < min(res.x, x + roi.x); ++i) {
+      for (int j = y; j < min(res.y, y + roi.y); ++j) {
+        const float3 ray = ComputeRay(res, fov, make_float2(i, j), eye_q);
+        depth_image[i * res.y + j] = split_depth;
+        point_cloud[i * res.y + j] = eye + split_depth * ray;
+      }
+    }
+  }
+}
 
 // Hmm ...
 struct SdfDepthImageRendererCu::Impl {
@@ -446,6 +534,10 @@ void SdfDepthImageRendererCu::Impl::SetFov(const Eigen::Vector2f& fov) {
   this->fov = float2{fov.x(), fov.y()};
 }
 
+inline __host__ int CeilDiv(const int a, const int b) {
+  return (a + b - 1) / b;
+}
+
 void SdfDepthImageRendererCu::Impl::Render(
     const Eigen::Isometry3f& camera_pose, Eigen::MatrixXf* const depth_image,
     std::vector<Eigen::Vector3f>* const point_cloud) {
@@ -455,6 +547,8 @@ void SdfDepthImageRendererCu::Impl::Render(
   const Eigen::Quaternionf q{camera_pose.linear()};
   const float4 eye_q{q.x(), q.y(), q.z(), q.w()};
 
+#if 1
+  // Normal
   // Prep kernel dims.
   const dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
   const dim3 blocks((res.x + threads.x - 1) / threads.x,
@@ -466,9 +560,24 @@ void SdfDepthImageRendererCu::Impl::Render(
   RayMarchingDepthWithProgramKernel<<<blocks, threads, shmem_size>>>(
       eye, eye_q, res, fov, thrust::raw_pointer_cast(program.data()),
       program.size(), thrust::raw_pointer_cast(params.data()), params.size(),
-      32, 100.0, 1e-2, thrust::raw_pointer_cast(depth_image_buf.data()),
+      16, 100.0F, 1e-2, thrust::raw_pointer_cast(depth_image_buf.data()),
       reinterpret_cast<float3*>(
           thrust::raw_pointer_cast(point_cloud_buf.data())));
+#else
+  // Ray Grouping
+  const int2 roi{2, 2};
+  const dim3 threads(BLOCK_SIZE, BLOCK_SIZE);
+  const dim3 blocks(CeilDiv(CeilDiv(res.x, roi.x), threads.x),
+                    CeilDiv(CeilDiv(res.y, roi.y), threads.y));
+  const int shmem_size =
+      sizeof(SdfDataCompact) * program.size() + sizeof(float) * params.size();
+  RayMarchingDepthWithProgramRayGroupingKernel<<<blocks, threads, shmem_size>>>(
+      eye, eye_q, res, fov, roi, thrust::raw_pointer_cast(program.data()),
+      program.size(), thrust::raw_pointer_cast(params.data()), params.size(),
+      32, 100.0F, 1e-2, thrust::raw_pointer_cast(depth_image_buf.data()),
+      reinterpret_cast<float3*>(
+          thrust::raw_pointer_cast(point_cloud_buf.data())));
+#endif
 
   // Export data.
   depth_image->resize(res.x, res.y);

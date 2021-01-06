@@ -8,7 +8,6 @@ target_compile_options(sdf_render_cu PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:
     --generate-line-info
     --use_fast_math
-    # -O3
     >)
 target_link_libraries(sdf_render_cu PRIVATE Eigen3::Eigen cho_gen_sdf)
 target_include_directories(sdf_render_cu PUBLIC include/)

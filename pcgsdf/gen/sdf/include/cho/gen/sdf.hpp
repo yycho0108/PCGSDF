@@ -1,15 +1,14 @@
 #pragma once
 
-#include "cho/gen/sdf_fwd.hpp"
-
 #include <fmt/printf.h>
+
+#include <Eigen/Core>
+#include <Eigen/Geometry>
 #include <iostream>
 #include <memory>
 #include <stack>
 
-#include <Eigen/Core>
-#include <Eigen/Geometry>
-
+#include "cho/gen/sdf_fwd.hpp"
 #include "cho/gen/sdf_types.hpp"
 
 #define USE_JIT_TEMP 1
@@ -277,22 +276,19 @@ class Cone : public SdfBase<Cone> {
   float Distance_(const Eigen::Vector3f& point) const {
     const Eigen::Vector2f q{radius_, height_};
     const Eigen::Vector2f w{point.head<2>().norm(), point.z()};
-
     const Eigen::Vector2f d{w - q};
-    const float k = q.y() / q.x();
-    const float k2 = q.x() * q.y() / (q.x() + q.norm());
-    const Eigen::Vector2f pr{q.x(), 0};
-    const Eigen::Vector2f ph{0, q.y()};
-    // (-ph.y)*w.x - (pr.x)*w.y
-    return k * d.y() >= w.x()
-               ? (w - ph).norm()
-               : ((w.y() >= -k2 * d.x() && k * w.y() >= d.x())
-                      ? Cross2(q, w - ph)
-                      : (w.x() >= q.x() ? (w - pr).norm() : -w.y()));
+    const float lql = q.norm();
+    return d.y() * q.y() >= q.x() * w.x()
+               ? std::sqrt(w.x() * w.x() + d.y() * d.y())
+               : (q.x() <= w.x() && q.y() * w.y() <= d.x() * q.x())
+                     ? std::sqrt(d.x() * d.x() + w.y() * w.y())
+                     : w.y() * (q.x() + lql) < -d.x() * q.y()
+                           ? -w.y()
+                           : (d.y() * q.x() + q.y() * w.x()) / lql;
   }
   // TODO(ycho): Implement
   Eigen::Vector3f Center_() const { return Eigen::Vector3f::Zero(); }
-  float Radius_() const { return radius_ * radius_ + height_ * height_; }
+  float Radius_() const { return sqrt(radius_ * radius_ + height_ * height_); }
 
   void Compile_(std::vector<SdfData>* const program) const {
     program->emplace_back(SdfData{SdfOpCode::CONE, {radius_, height_}});

@@ -156,6 +156,8 @@ cho::gen::SdfPtr GenerateObject(std::default_random_engine &rng,
       scene->Center() + sr * Eigen::Vector3f::Ones()};
 
   // NOTE(ycho): Generally, value_dist ~ geometry dimensions.
+  //SdfPrimitiveDistribution<Sphere, Box, Cylinder, Cone, Torus> sdf_dist{-2.0F,
+  //                                                                      2.0F};
   SdfPrimitiveDistribution<Sphere, Box, Cylinder, Cone, Torus> sdf_dist{-2.0F,
                                                                         2.0F};
 

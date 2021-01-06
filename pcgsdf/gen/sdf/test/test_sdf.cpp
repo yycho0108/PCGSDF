@@ -343,13 +343,15 @@ int main() {
 
   // Initialize RNG.
   const std::int64_t seed =
-      std::chrono::high_resolution_clock::now().time_since_epoch().count();
+     std::chrono::high_resolution_clock::now().time_since_epoch().count();
+
   // const std::int64_t seed = 0;
   // const std::int64_t seed = 1609268978845759618;
   // const std::int64_t seed = 1609529784716097929;
   // const std::int64_t seed = 1609539747653922532;
   // const std::int64_t seed = 1609540336680865385;
   // const std::int64_t seed = 1609544564348054667;
+  // const std::int64_t seed = 1609862625864541180;
   fmt::print("seed={}\n", seed);
   rng.seed(seed);
 
@@ -392,7 +394,7 @@ int main() {
   // NOTE(yycho0108): kShowTrajectory is disabled if following trajectory,
   // since the primitives generated for showing the trajectory would
   // occlude the camera.
-  if (!kFollowTrajectory && kShowTrajectory) {
+  if (!kFollowTrajectory && kShowTrajectory && !trajectory.empty()) {
     scene_sdf =
         cho::gen::OpUnion::Create(scene_sdf, TrajectoryToSdf(trajectory));
   }
@@ -581,7 +583,7 @@ int main() {
       }
       vis.UpdateRender();
 
-      vis.CaptureScreenImage(fmt::format("/tmp/{:04d}.png", tcount), true);
+      // vis.CaptureScreenImage(fmt::format("/tmp/{:04d}.png", tcount), true);
 
       auto t1 = std::chrono::high_resolution_clock::now();
 
